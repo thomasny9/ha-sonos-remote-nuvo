@@ -1,3 +1,3 @@
 DOMAIN = "sonos_remote"
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 CARD_URL = "/sonos_remote/sonos-remote-card.js"

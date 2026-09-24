@@ -5,6 +5,7 @@ from pathlib import Path
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.components.frontend import add_extra_js_url, remove_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -37,18 +38,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, websocket_sonos_remote_nuvo_info)
         domain_data["ws_registered"] = True
 
-    frontend = hass.data.get("frontend")
-    if frontend is not None:
-        extra_modules = getattr(frontend, "extra_modules", None)
-        if extra_modules is not None:
-            extra_modules.add(f"{CARD_URL}?v={VERSION}")
+    # Register the bundled card as a frontend module. Home Assistant exposes
+    # add_extra_js_url specifically so custom integrations can load frontend JS
+    # without requiring users to create a Lovelace resource manually.
+    if not domain_data.get("frontend_registered"):
+        add_extra_js_url(hass, f"{CARD_URL}?v={VERSION}")
+        domain_data["frontend_registered"] = True
 
     domain_data[entry.entry_id] = {}
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    domain_data = hass.data.get(DOMAIN, {})
+    domain_data.pop(entry.entry_id, None)
+
+    # Only remove the frontend module when the final config entry is unloaded.
+    active_entries = [
+        config_entry
+        for config_entry in hass.config_entries.async_entries(DOMAIN)
+        if config_entry.entry_id != entry.entry_id
+        and config_entry.state.recoverable
+    ]
+    if not active_entries and domain_data.get("frontend_registered"):
+        remove_extra_js_url(hass, f"{CARD_URL}?v={VERSION}")
+        domain_data["frontend_registered"] = False
     return True
 
 

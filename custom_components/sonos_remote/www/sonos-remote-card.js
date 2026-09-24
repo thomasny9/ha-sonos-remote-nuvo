@@ -18,6 +18,7 @@ class SonosRemoteCard extends HTMLElement {
     this._backendInfo = this._backendInfo || null;
     this._nuvoInfo = this._nuvoInfo || null;
     this._nuvoLoading = false;
+    this._hybridTarget = this._hybridTarget || null;
     this._volumeSendTimer = null;
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
   }
@@ -63,7 +64,7 @@ class SonosRemoteCard extends HTMLElement {
     this._nuvoLoading=true;
     try { this._nuvoInfo=await this._hass.callWS({type:"sonos_remote/nuvo_info"}); }
     catch(e) { this._nuvoInfo={available:false,zones:[]}; }
-    finally { this._nuvoLoading=false; if(this._view==="rooms") this._render(); }
+    finally { this._nuvoLoading=false; this._render(); }
   }
   _nuvoZonesHtml() {
     const zones=this._nuvoInfo?.zones||[];
@@ -173,6 +174,59 @@ class SonosRemoteCard extends HTMLElement {
     for(const p of this._players||[]) if(!grouped.has(p.entity_id)) choices.push({id:p.entity_id,label:p.attributes?.friendly_name||p.entity_id,sub:p.state==="playing"?(p.attributes?.media_title||"Playing"):"Not playing",icon:"mdi:speaker"});
     return choices;
   }
+  _nuvoZones() {
+    return (this._nuvoInfo?.zones||[]).map(z=>this._hass.states[z.entity_id]||{entity_id:z.entity_id,state:z.state,attributes:z});
+  }
+  _sonosForSource(source) {
+    const key=String(source||"").trim().toLowerCase();
+    if(!key)return null;
+    const words=key.replace(/[^a-z0-9]+/g," ").trim().split(/\s+/).filter(Boolean);
+    let best=null,bestScore=0;
+    for(const p of this._players||[]){
+      const name=String(p.attributes?.friendly_name||p.entity_id).toLowerCase();
+      let score=name===key?100:(name.includes(key)||key.includes(name)?50:0);
+      for(const w of words)if(w.length>1&&name.includes(w))score+=5;
+      if(score>bestScore){best=p.entity_id;bestScore=score;}
+    }
+    return bestScore>=5?best:null;
+  }
+  _hybridChoices() {
+    const zones=this._nuvoZones(), choices=[];
+    for(const z of zones){
+      const a=z.attributes||{},src=a.source||"";
+      choices.push({id:`nuvo:${z.entity_id}`,kind:"nuvo",entities:[z.entity_id],label:a.friendly_name||z.entity_id,sub:src?`Nuvo · ${src}`:"Nuvo zone",icon:"mdi:speaker"});
+    }
+    const bySource=new Map();
+    for(const z of zones){
+      if(z.state==="off")continue;
+      const src=z.attributes?.source||"";
+      if(!src)continue;
+      if(!bySource.has(src))bySource.set(src,[]);
+      bySource.get(src).push(z);
+    }
+    for(const [src,members] of bySource){
+      if(members.length<2)continue;
+      choices.push({id:`nuvogroup:${encodeURIComponent(src)}`,kind:"nuvogroup",entities:members.map(x=>x.entity_id),label:members.map(x=>x.attributes?.friendly_name||x.entity_id).join(" + "),sub:`${members.length} Nuvo zones · ${src}`,icon:"mdi:speaker-multiple"});
+    }
+    for(const p of this._playerChoices())choices.push({...p,kind:"sonos",entities:[p.id],sub:`Sonos source · ${p.sub}`});
+    return choices;
+  }
+  _hybridChoice() {
+    const choices=this._hybridChoices();
+    return choices.find(x=>x.id===this._hybridTarget)||choices.find(x=>x.kind==="nuvo")||choices[0]||null;
+  }
+  _hybridContext() {
+    const choice=this._hybridChoice();
+    if(!choice)return {choice:null,entities:[],source:"",sources:[],volume:null,sonos:this._selected};
+    if(choice.kind==="sonos")return {choice,entities:[],source:"",sources:[],volume:null,sonos:choice.id};
+    const states=choice.entities.map(id=>this._hass.states[id]).filter(Boolean);
+    const source=states[0]?.attributes?.source||"";
+    const sourceLists=states.map(x=>x.attributes?.source_list||[]).filter(x=>x.length);
+    const sources=sourceLists.length?sourceLists.reduce((a,b)=>a.filter(x=>b.includes(x))):[];
+    const vols=states.map(x=>x.attributes?.volume_level).filter(v=>Number.isFinite(v));
+    const volume=vols.length?Math.round((vols.reduce((a,b)=>a+b,0)/vols.length)*100):0;
+    return {choice,entities:choice.entities,source,sources,volume,sonos:this._sonosForSource(source)||this._selected};
+  }
   _currentGroup() {
     if(!this._selected) return [];
     const g=this._groups().find(x=>x.members.includes(this._selected));
@@ -212,6 +266,8 @@ class SonosRemoteCard extends HTMLElement {
     if(oldMain) this._scrollTop[this._view]=oldMain.scrollTop;
     const oldPicker=this.shadowRoot.querySelector("#playerlist");
     if(oldPicker) this._pickerScrollTop[this._view]=oldPicker.scrollTop;
+    const hybrid=this._hybridContext();
+    if(hybrid.sonos && this._hass.states[hybrid.sonos]) this._selected=hybrid.sonos;
     const st=this._hass.states[this._selected], a=st?.attributes||{};
     const title=a.media_title||"Nothing playing", artist=a.media_artist||"", album=a.media_album_name||"";
     const art=a.entity_picture?this._hass.hassUrl(a.entity_picture):"", playing=st?.state==="playing";
@@ -230,7 +286,7 @@ class SonosRemoteCard extends HTMLElement {
     this.shadowRoot.innerHTML=`
     <style>
       :host{display:block} ha-card{height:min(760px,calc(100dvh - 96px));min-height:620px;overflow:hidden;border-radius:22px;background:#111214;color:#f5f5f5;border:0;box-shadow:0 14px 40px rgba(0,0,0,.28);display:flex;flex-direction:column}.viewscroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#4a4d52 transparent}.viewscroll.nowview{overflow-y:hidden}
-      .wrap{padding:12px 18px 4px}.top{display:flex;justify-content:center;align-items:center;margin-bottom:8px}.playerpick{display:flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px;margin:0;background:transparent;color:#f5f5f5;font-size:20px;font-weight:700}.playerpick span{max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.picker{display:none;margin:0 0 14px;padding:8px;border-radius:14px;background:#202124}.picker.open{display:block;max-height:240px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#4a4d52 transparent}.pickrow{display:flex;align-items:center;gap:9px;width:100%;padding:9px 10px;border-radius:10px;text-align:left;color:#f5f5f5}.pickrow.active{background:#303236}.pickrow span{flex:1}.art,.placeholder{aspect-ratio:1/1;width:min(100%,300px);margin:0 auto;border-radius:16px;background:#202124}
+      .wrap{padding:12px 18px 4px}.top{display:flex;justify-content:center;align-items:center;margin-bottom:8px}.playerpick{display:flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px;margin:0;background:transparent;color:#f5f5f5;font-size:20px;font-weight:700}.playerpick span{max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.picker{display:none;margin:0 0 14px;padding:8px;border-radius:14px;background:#202124}.hybridsource{width:100%;box-sizing:border-box;margin:0 0 10px;padding:10px 12px;border:1px solid #34363a;border-radius:10px;background:#202124;color:#f5f5f5;font-size:14px}.picker.open{display:block;max-height:240px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#4a4d52 transparent}.pickrow{display:flex;align-items:center;gap:9px;width:100%;padding:9px 10px;border-radius:10px;text-align:left;color:#f5f5f5}.pickrow.active{background:#303236}.pickrow span{flex:1}.art,.placeholder{aspect-ratio:1/1;width:min(100%,300px);margin:0 auto;border-radius:16px;background:#202124}
       .art{object-fit:contain;display:block;background:#111214}.placeholder{display:grid;place-items:center;font-size:64px;opacity:.65}.meta{text-align:center}.progress{margin:8px 0 2px}.progress input{width:100%}.progress.live{margin:13px 0 7px}.liveline{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;color:#8f9297;font-size:10px;letter-spacing:.12em}.liveline span{height:1px;background:#3b3d41}.liveline b{font-weight:700}.times{display:flex;justify-content:space-between;color:#8f9297;font-size:11px}.topcopy{text-align:center;min-width:0}.eyebrow{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:#8f9297;font-weight:700}
       h2{margin:10px 0 3px;font-size:24px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .artist,.album{color:#a9acb1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.album{font-size:13px;margin-top:3px}
@@ -243,10 +299,10 @@ class SonosRemoteCard extends HTMLElement {
       .rooms{padding:18px;min-height:100%;box-sizing:border-box}.roomhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.roomhead h1{margin:0;font-size:28px}.roomsummary{font-size:12px;color:#8f9297;margin:-6px 0 14px}.roomlist{border-top:1px solid #292b2f}.room{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;align-items:center;padding:10px 2px;border-bottom:1px solid #292b2f;background:transparent}.check{width:26px;height:26px;min-height:26px;border:1px solid #62656a;border-radius:50%;display:grid;place-items:center}.check.on{background:#f5f5f5;border-color:#f5f5f5;color:#111214}.roommain{min-width:0}.roomline{display:flex;align-items:center;gap:8px}.roomname{font-weight:650;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.roomstate{font-size:11px;color:#8f9297}.roomsub{font-size:12px;color:#8f9297;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}.roomvol{display:grid;grid-template-columns:20px 1fr 30px;gap:7px;align-items:center;margin-top:7px}.roomvol input{width:100%;margin:0}.roomvol span{text-align:right;font-size:11px;color:#8f9297}.roomvol ha-icon{--mdc-icon-size:17px;color:#8f9297}.applybar{position:sticky;bottom:0;padding:12px 0 2px;background:linear-gradient(transparent,#111214 22%)}.apply{width:100%;height:46px;border-radius:23px!important;background:#f5f5f5!important;color:#111214!important;font-weight:700;margin-top:8px}.apply:disabled{opacity:.35;cursor:default}.nuvohead{display:flex;justify-content:space-between;align-items:center;margin:22px 0 8px;padding-top:16px;border-top:1px solid #34363a;font-weight:700}.nuvohead small{font-size:11px;color:#8f9297;font-weight:500}.nuvozone{padding:11px 2px;border-bottom:1px solid #292b2f}.nuvotop{display:flex;align-items:center;gap:10px}.nuvopower{width:30px;height:30px;min-height:30px;border:1px solid #55585d;border-radius:50%;display:grid;place-items:center;color:#8f9297}.nuvopower.on{background:#f5f5f5;color:#111214;border-color:#f5f5f5}.nuvopower ha-icon{--mdc-icon-size:17px}.nuvoname{min-width:0}.nuvoname b,.nuvoname small{display:block}.nuvoname small{font-size:11px;color:#8f9297;margin-top:1px}.nuvoctl{display:grid;grid-template-columns:20px 1fr 30px;gap:7px;align-items:center;margin:9px 0 8px 40px}.nuvoctl ha-icon{--mdc-icon-size:17px;color:#8f9297}.nuvoctl input{width:100%;margin:0}.nuvoctl span{text-align:right;font-size:11px;color:#8f9297}.nuvozone select{margin-left:40px;width:calc(100% - 40px);background:#202124;color:#f5f5f5;border:1px solid #34363a;border-radius:9px;padding:8px 9px;font:inherit;font-size:12px}.roomstate:not(:empty){padding:2px 6px;border-radius:8px;background:#25272a}.pickrow small{display:block;color:#8f9297;font-size:11px;margin-top:2px}.pickrow b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .music{padding:18px;min-height:100%;box-sizing:border-box}.music .roomhead{margin-bottom:7px}.music .roomhead h1{color:#f5f5f5}.musicdestlabel{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#8f9297;font-weight:700}.music .playerpick{justify-content:flex-start;padding:4px 0 9px;font-size:17px;max-width:100%}.music .picker{margin-bottom:12px}.sectionrow{display:flex;align-items:center;justify-content:space-between;margin-top:18px}.sectionrow .sectiontitle{margin:0 0 10px}.seeall,.maback{min-height:36px;color:#a9acb1;font-size:13px;padding:0 2px}.maback{display:flex;align-items:center;gap:2px;margin:0 0 6px}.maback ha-icon{--mdc-icon-size:18px}.search{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;background:#202124;border:1px solid #2d2f33;border-radius:14px;padding:10px 13px;margin-bottom:16px;color:#a9acb1}.search input{border:0;outline:0;background:transparent;color:#f5f5f5;font:inherit;width:100%}.search input::placeholder{color:#777b81}.sectiontitle{font-size:17px;font-weight:700;margin:18px 0 10px;color:#f5f5f5}.fav{display:grid;grid-template-columns:48px minmax(0,1fr) 28px;gap:10px;align-items:center;width:100%;padding:9px;border-radius:12px;background:#202124;color:#f5f5f5;margin-bottom:7px;text-align:left}.favart{width:48px;height:48px;border-radius:9px;background:#2b2d31;display:grid;place-items:center;color:#d7d8da}.favname{display:block;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favsub{display:block;font-size:12px;color:#8f9297;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mahint{padding:12px 4px;color:#8f9297;font-size:13px}.maitem{text-align:left;width:100%}.mawrap{position:relative}.mawrap .maitem{padding-right:44px}.maoptions{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:38px;min-height:38px;display:grid;place-items:center;z-index:2}.maoptions ha-icon{--mdc-icon-size:20px}.maactionmenu{position:absolute;right:4px;top:42px;z-index:25;width:180px;background:#202124;border:1px solid #34363a;border-radius:12px;padding:5px;box-shadow:0 12px 30px rgba(0,0,0,.45)}.maactionmenu button{display:block;width:100%;min-height:40px;text-align:left;padding:0 10px;border-radius:8px;font-size:13px}.maactionmenu button:hover{background:#303236}.queue{padding:18px;min-height:100%;box-sizing:border-box}.queue .roomhead{margin-bottom:4px}.queue .playerpick{justify-content:flex-start;padding:4px 0 10px;font-size:17px;max-width:100%}.queue .picker{margin-bottom:12px}.queuehead{display:flex;align-items:center;justify-content:space-between}.clearq{min-height:38px;color:#a9acb1;font-size:13px;padding:0 2px}.qitem{display:grid;grid-template-columns:minmax(0,1fr) 42px;align-items:center;border-bottom:1px solid #292b2f}.qitem.current{background:#1d1f22;border-radius:10px}.qplay{display:grid;grid-template-columns:34px minmax(0,1fr);gap:8px;align-items:center;text-align:left;padding:8px 2px;min-width:0}.qnum{display:grid;place-items:center;color:#8f9297;font-size:12px}.qnum ha-icon{--mdc-icon-size:18px;color:#f5f5f5}.qcopy{min-width:0}.qcopy b,.qcopy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qcopy b{font-size:14px}.qcopy small{font-size:12px;color:#8f9297;margin-top:2px}.qremove{min-height:42px;color:#777b81}.qremove ha-icon{--mdc-icon-size:18px}.queueempty{min-height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#8f9297;gap:8px}.queueempty ha-icon{--mdc-icon-size:42px}.queueempty b{color:#f5f5f5}.queueempty span{font-size:13px;max-width:240px}.stub{min-height:100%;box-sizing:border-box;padding:20px}.stub h2{margin-top:0}@media(min-width:600px){ha-card{max-width:430px;margin:auto}}
     </style><ha-card>
-    <main class="viewscroll ${this._view==="now"?"nowview":""}">${this._view==="now"?`<div class="wrap"><div class="top"><div class="topcopy"><div class="eyebrow">Now Playing</div><button class="playerpick" id="playerpick"><span>${this._esc(a.friendly_name||"Select Sonos")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button></div></div><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._playerChoices().map(p=>`<button class="pickrow ${p.id===this._selected?"active":""}" data-select-player="${p.id}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===this._selected?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div>${art?`<img class="art" src="${art}" alt="">`:`<div class="placeholder">♫</div>`}<div class="meta"><h2>${this._esc(title)}</h2><div class="artist">${this._esc(artist)}</div><div class="album">${this._esc(album)}</div><div class="progress ${duration?"":"live"}">${duration?`<input id="seek" type="range" min="0" max="100" value="${progress}"><div class="times"><span id="elapsed">${fmt(position)}</span><span>${fmt(duration)}</span></div>`:`<div class="liveline"><span></span><b>LIVE</b><span></span></div>`}</div></div></div>
+    <main class="viewscroll ${this._view==="now"?"nowview":""}">${this._view==="now"?`<div class="wrap"><div class="top"><div class="topcopy"><div class="eyebrow">Now Playing</div><button class="playerpick" id="playerpick"><span>${this._esc(hybrid.choice?.label||a.friendly_name||"Select room")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button></div></div><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._hybridChoices().map(p=>`<button class="pickrow ${p.id===hybrid.choice?.id?"active":""}" data-select-hybrid="${this._esc(p.id)}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===hybrid.choice?.id?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div>${hybrid.choice&&hybrid.choice.kind!=="sonos"&&hybrid.sources.length?`<select class="hybridsource" id="hybridsource">${hybrid.sources.map(x=>`<option value="${this._esc(x)}" ${x===hybrid.source?"selected":""}>${this._esc(x)}</option>`).join("")}</select>`:""}${art?`<img class="art" src="${art}" alt="">`:`<div class="placeholder">♫</div>`}<div class="meta"><h2>${this._esc(title)}</h2><div class="artist">${this._esc(artist)}</div><div class="album">${this._esc(album)}</div><div class="progress ${duration?"":"live"}">${duration?`<input id="seek" type="range" min="0" max="100" value="${progress}"><div class="times"><span id="elapsed">${fmt(position)}</span><span>${fmt(duration)}</span></div>`:`<div class="liveline"><span></span><b>LIVE</b><span></span></div>`}</div></div></div>
     <div class="controls"><button class="${a.shuffle?"activecmd":""}" data-action="shuffle"><ha-icon icon="mdi:shuffle-variant"></ha-icon></button><button class="skip" data-action="previous"><ha-icon icon="mdi:skip-previous"></ha-icon></button><button class="main" data-action="toggle"><ha-icon icon="${playing?"mdi:pause":"mdi:play"}"></ha-icon></button><button class="skip" data-action="next"><ha-icon icon="mdi:skip-next"></ha-icon></button><button class="${a.repeat&&a.repeat!=="off"?"activecmd":""}" data-action="repeat"><ha-icon icon="${a.repeat==="one"?"mdi:repeat-once":"mdi:repeat"}"></ha-icon></button></div>
-    <div class="volume"><button data-action="mute"><ha-icon icon="${a.is_volume_muted?"mdi:volume-off":"mdi:volume-medium"}"></ha-icon></button><input id="vol" type="range" min="0" max="100" value="${volume}"><span>${volume}</span></div>
-    <div class="group" data-view="rooms"><small>Playing in</small>${this._esc(rooms||"Select a room")} ›</div>`:
+    ${hybrid.choice?.kind!=="sonos"?`<div class="volume"><ha-icon icon="mdi:volume-medium"></ha-icon><input id="hybridvol" type="range" min="0" max="100" value="${hybrid.volume??0}"><span>${hybrid.volume??0}</span></div>`:""}
+    <div class="group" data-view="rooms"><small>${hybrid.choice?.kind==="sonos"?"Sonos source":"Playing in"}</small>${this._esc(hybrid.choice?.label||rooms||"Select a room")} ›</div>`:
     this._view==="rooms"?`<div class="rooms"><div class="roomhead"><h1>Rooms</h1></div><div class="roomsummary">${this._players.length} Sonos rooms · ${this._groups().filter(g=>g.members.length>1).length} active group${this._groups().filter(g=>g.members.length>1).length===1?"":"s"}</div><div class="roomlist">${this._players.map(p=>{const pa=p.attributes||{},v=Math.round((pa.volume_level||0)*100),on=this._selectedRooms.has(p.entity_id),gm=pa.group_members||[p.entity_id],grouped=gm.length>1;return `<div class="room"><button class="check ${on?"on":""}" data-room="${p.entity_id}">${on?"✓":""}</button><div class="roommain"><div class="roomline"><div class="roomname">${this._esc(pa.friendly_name||p.entity_id)}</div><div class="roomstate">${grouped?`${gm.length} rooms`:(p.state==="playing"?"Playing":"")}</div></div><div class="roomsub">${this._esc(pa.media_title||(grouped?"Grouped":"Not playing"))}</div><div class="roomvol"><ha-icon icon="mdi:volume-medium"></ha-icon><input data-roomvol="${p.entity_id}" type="range" min="0" max="100" value="${v}"><span>${v}</span></div></div></div>`}).join("")}</div><div class="applybar"><button class="apply" id="apply" ${(!this._selectedRooms.size||this._sameMembers([...this._selectedRooms],this._currentGroup()))?"disabled":""}>${this._groupActionLabel()}</button></div><div id="nuvozones">${this._nuvoZonesHtml()}</div></div>`:this._view==="music"?`<div class="music"><div class="roomhead"><h1>Music</h1></div><div class="musicdestlabel">Play in</div><button class="playerpick" id="playerpick"><span>${this._esc(this._playerChoices().find(p=>p.id===this._selected)?.label||a.friendly_name||"Select Sonos")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._playerChoices().map(p=>`<button class="pickrow ${p.id===this._selected?"active":""}" data-select-player="${p.id}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===this._selected?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div><label class="search"><ha-icon icon="mdi:magnify"></ha-icon><input id="musicsearch" placeholder="Search Music Assistant" value="${this._esc(this._lastSearch||"")}"></label>${this._backendInfo?.music_assistant?.available?`<div id="maresults">${this._maResultsHtml()}</div>`:""}${this._backendInfo?.music_assistant?.available?`<div id="recent">${this._recentHtml()}</div>`:""}<div class="sectiontitle">Sonos Favorites</div><div id="favorites">${this._favoritesHtml()}</div></div>`:this._view==="queue"?`<div class="queue"><div class="queuehead"><div class="roomhead"><h1>Queue</h1></div>${(this._queue?.items||[]).length?`<button class="clearq" id="clearqueue">Clear Queue</button>`:""}</div><div class="musicdestlabel">Queue for</div><button class="playerpick" id="playerpick"><span>${this._esc(this._playerChoices().find(p=>p.id===this._selected)?.label||a.friendly_name||"Select Sonos")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._playerChoices().map(p=>`<button class="pickrow ${p.id===this._selected?"active":""}" data-select-player="${p.id}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===this._selected?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div><div id="queueitems">${this._queueHtml()}</div></div>`:`<div class="stub"><h2>${this._view[0].toUpperCase()+this._view.slice(1)}</h2><div class="artist">Coming in the next implementation stage</div></div>`}
     </main><nav class="tabs">${this._tab("now","mdi:music-circle","Now Playing")}${this._tab("rooms","mdi:speaker-multiple","Rooms")}${this._tab("music","mdi:music-note","Music")}${this._tab("queue","mdi:playlist-music","Queue")}</nav></ha-card>`;
     const mainScroll=this.shadowRoot.querySelector(".viewscroll");
@@ -257,6 +313,21 @@ class SonosRemoteCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-view]").forEach(el=>el.onclick=()=>{this._view=el.dataset.view;this._render();if(this._view==="queue")this._loadQueue();});
     this.shadowRoot.querySelector("#playerpick")?.addEventListener("click",()=>{this._pickerOpen=!this._pickerOpen;this._render();});
     this.shadowRoot.querySelector("#playerlist")?.addEventListener("scroll",e=>{this._pickerScrollTop[this._view]=e.currentTarget.scrollTop;},{passive:true});
+    this.shadowRoot.querySelectorAll("[data-select-hybrid]").forEach(el=>el.onclick=()=>{
+      this._hybridTarget=el.dataset.selectHybrid;
+      const ctx=this._hybridContext();
+      if(ctx.sonos&&this._hass.states[ctx.sonos])this._selected=ctx.sonos;
+      this._pickerOpen=false;this._pickerScrollTop[this._view]=0;this._render();
+    });
+    this.shadowRoot.querySelector("#hybridsource")?.addEventListener("change",async e=>{
+      const ctx=this._hybridContext(); if(!ctx.entities.length)return;
+      await this._hass.callService("media_player","select_source",{entity_id:ctx.entities,source:e.target.value});
+      const sonos=this._sonosForSource(e.target.value);if(sonos)this._selected=sonos;
+      setTimeout(()=>this._loadNuvoInfo(true),250);
+    });
+    const hybridVol=this.shadowRoot.querySelector("#hybridvol");
+    hybridVol?.addEventListener("input",e=>{const n=e.target.nextElementSibling;if(n)n.textContent=e.target.value;});
+    hybridVol?.addEventListener("change",e=>{const ctx=this._hybridContext();if(ctx.entities.length)this._hass.callService("media_player","volume_set",{entity_id:ctx.entities,volume_level:Number(e.target.value)/100});});
     this.shadowRoot.querySelectorAll("[data-select-player]").forEach(el=>el.onclick=()=>{this._selected=el.dataset.selectPlayer;this._pickerOpen=false;this._pickerScrollTop[this._view]=0;if(this._view==="queue"){this._queue=null;this._queuePlayer=null;}const g=this._groups().find(x=>x.members.includes(this._selected));this._selectedRooms=new Set(g?.members||[this._selected]);this._render();if(this._view==="queue")this._loadQueue(true);});
     this.shadowRoot.querySelector('[data-action="toggle"]')?.addEventListener("click",()=>this._call("media_play_pause"));
     this.shadowRoot.querySelector('[data-action="previous"]')?.addEventListener("click",()=>this._call("media_previous_track"));
@@ -363,4 +434,4 @@ class SonosRemoteCard extends HTMLElement {
 if(!customElements.get("sonos-remote-card")) customElements.define("sonos-remote-card",SonosRemoteCard);
 window.customCards=window.customCards||[];
 window.customCards.push({type:"sonos-remote-card",name:"Sonos Remote with Nuvo",description:"Mobile-first Sonos and Nuvo remote for Home Assistant."});
-console.info("%c SONOS REMOTE WITH NUVO %c v0.4.0 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");
+console.info("%c SONOS REMOTE WITH NUVO %c v0.5.0 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");

@@ -362,5 +362,5 @@ class SonosRemoteCard extends HTMLElement {
 }
 if(!customElements.get("sonos-remote-card")) customElements.define("sonos-remote-card",SonosRemoteCard);
 window.customCards=window.customCards||[];
-window.customCards.push({type:"sonos-remote-card",name:"Sonos Remote + Nuvo",description:"Mobile-first Sonos and Nuvo remote for Home Assistant."});
-console.info("%c SONOS REMOTE + NUVO %c v0.4.0 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");
+window.customCards.push({type:"sonos-remote-card",name:"Sonos Remote with Nuvo",description:"Mobile-first Sonos and Nuvo remote for Home Assistant."});
+console.info("%c SONOS REMOTE WITH NUVO %c v0.4.0 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");

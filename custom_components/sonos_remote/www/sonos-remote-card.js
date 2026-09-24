@@ -179,15 +179,10 @@ class SonosRemoteCard extends HTMLElement {
     return (n & feature)===feature;
   }
   _canSetVolume(entity) {
-    if(!this._supports(entity,4)) return false;
-    const a=entity?.attributes||{};
-    const model=String(a.model_name||a.model||a.device_model||"").toLowerCase();
-    const name=String(a.friendly_name||entity?.entity_id||"").toLowerCase();
-    // Sonos fixed-output Ports can still expose VOLUME_SET through HA; the
-    // service then fails with UPnP 501. In a Sonos+Nuvo system, a Port pinned
-    // at 100% is the fixed line-level source, so volume belongs to Nuvo.
-    if((model.includes("port")||name.includes("sonos")) && Number(a.volume_level)>=0.999) return false;
-    return true;
+    // Sonos Remote with Nuvo treats Sonos players as fixed-level source feeds.
+    // HA's Sonos entity advertises VOLUME_SET even when a Port is configured
+    // Fixed, so supported_features cannot reliably identify fixed line-out.
+    return false;
   }
   _canMute(entity) { return this._supports(entity,8); }
   _openMusicAssistant() {
@@ -453,4 +448,4 @@ class SonosRemoteCard extends HTMLElement {
 if(!customElements.get("sonos-remote-card")) customElements.define("sonos-remote-card",SonosRemoteCard);
 window.customCards=window.customCards||[];
 window.customCards.push({type:"sonos-remote-card",name:"Sonos Remote with Nuvo",description:"Mobile-first Sonos and Nuvo remote for Home Assistant."});
-console.info("%c SONOS REMOTE WITH NUVO %c v0.5.4 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");
+console.info("%c SONOS REMOTE WITH NUVO %c v0.5.5 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");

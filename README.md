@@ -4,9 +4,9 @@
 
 Sonos Remote with Nuvo is a mobile-first Home Assistant remote with a Lovelace frontend and a companion backend integration.
 
-## v0.1.0
+## v0.5.0
 
-This first version establishes the combined architecture.
+This revision makes Nuvo rooms the primary listening targets in hybrid Sonos + Nuvo systems. The Now Playing selector includes individual Nuvo zones, active same-source multi-zone combinations, and the underlying Sonos sources. Nuvo selections control zone/group volume and source while Sonos remains the playback engine. Fixed-level Sonos sources no longer present a misleading Now Playing volume control.
 
 ### Backend
 - Home Assistant custom integration at `custom_components/sonos_remote`
@@ -37,7 +37,7 @@ The integration serves the card at:
 
 Add the following URL once under **Settings → Dashboards → Resources** as a **JavaScript Module**:
 
-`/sonos_remote/sonos-remote-card.js?v=0.4.0`
+`/sonos_remote/sonos-remote-card.js?v=0.5.0`
 
 This explicit Lovelace resource is intentional. It avoids a Home Assistant cold-load race where automatically injected custom-card JavaScript can load after the dashboard tries to create the card, resulting in a temporary **Custom element doesn't exist** error after a hard refresh.
 

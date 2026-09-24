@@ -54,13 +54,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     domain_data.pop(entry.entry_id, None)
 
     # Only remove the frontend module when the final config entry is unloaded.
-    active_entries = [
+    other_entries = [
         config_entry
         for config_entry in hass.config_entries.async_entries(DOMAIN)
         if config_entry.entry_id != entry.entry_id
-        and config_entry.state.recoverable
     ]
-    if not active_entries and domain_data.get("frontend_registered"):
+    if not other_entries and domain_data.get("frontend_registered"):
         remove_extra_js_url(hass, f"{CARD_URL}?v={VERSION}")
         domain_data["frontend_registered"] = False
     return True

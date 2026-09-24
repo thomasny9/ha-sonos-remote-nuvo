@@ -1,4 +1,6 @@
-# Sonos Remote for Home Assistant
+# Sonos Remote + Nuvo
+
+> Designed specifically for hybrid whole-home audio systems that combine Sonos with Nuvo multi-zone audio. Sonos provides the modern music and playback layer, while Nuvo zones remain fully usable as distributed room outputs.
 
 Sonos Remote is a mobile-first Home Assistant remote with a Lovelace frontend and a companion backend integration.
 

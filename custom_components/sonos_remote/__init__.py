@@ -34,6 +34,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, websocket_sonos_remote_recently_played)
         websocket_api.async_register_command(hass, websocket_sonos_remote_queue)
         websocket_api.async_register_command(hass, websocket_sonos_remote_queue_action)
+        websocket_api.async_register_command(hass, websocket_sonos_remote_nuvo_info)
         domain_data["ws_registered"] = True
 
     frontend = hass.data.get("frontend")
@@ -63,6 +64,45 @@ def _platform_entities(hass: HomeAssistant, platform: str) -> list[str]:
 def _sonos_entities(hass: HomeAssistant) -> list[str]:
     return _platform_entities(hass, "sonos")
 
+
+
+def _nuvo_entities(hass: HomeAssistant) -> list[str]:
+    """Discover Nuvo media players without assuming a specific entity naming scheme."""
+    registry = er.async_get(hass)
+    found = []
+    for entity in registry.entities.values():
+        if entity.domain != "media_player":
+            continue
+        platform = str(entity.platform or "").casefold()
+        if "nuvo" not in platform:
+            continue
+        if hass.states.get(entity.entity_id) is not None:
+            found.append(entity.entity_id)
+    return sorted(found)
+
+
+@websocket_api.websocket_command({"type": "sonos_remote/nuvo_info"})
+@websocket_api.async_response
+async def websocket_sonos_remote_nuvo_info(hass, connection, msg):
+    zones = []
+    for entity_id in _nuvo_entities(hass):
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        attrs = state.attributes
+        zones.append(
+            {
+                "entity_id": entity_id,
+                "name": attrs.get("friendly_name", entity_id),
+                "state": state.state,
+                "volume_level": attrs.get("volume_level"),
+                "is_volume_muted": attrs.get("is_volume_muted"),
+                "source": attrs.get("source"),
+                "source_list": attrs.get("source_list") or [],
+                "supported_features": attrs.get("supported_features", 0),
+            }
+        )
+    connection.send_result(msg["id"], {"available": bool(zones), "zones": zones})
 
 def _ma_entry(hass: HomeAssistant):
     entries = hass.config_entries.async_entries("music_assistant")

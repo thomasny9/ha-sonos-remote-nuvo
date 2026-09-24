@@ -1,8 +1,8 @@
-# Sonos Remote + Nuvo
+# Sonos Remote with Nuvo
 
 > Designed specifically for hybrid whole-home audio systems that combine Sonos with Nuvo multi-zone audio. Sonos provides the modern music and playback layer, while Nuvo zones remain fully usable as distributed room outputs.
 
-Sonos Remote is a mobile-first Home Assistant remote with a Lovelace frontend and a companion backend integration.
+Sonos Remote with Nuvo is a mobile-first Home Assistant remote with a Lovelace frontend and a companion backend integration.
 
 ## v0.1.0
 
@@ -29,7 +29,7 @@ This first version establishes the combined architecture.
 
 Add this repository as a custom HACS **Integration** repository and download it.
 
-Restart Home Assistant, then go to **Settings → Devices & services → Add Integration → Sonos Remote**.
+Restart Home Assistant, then go to **Settings → Devices & services → Add Integration → Sonos Remote with Nuvo**.
 
 The integration serves the card at:
 
@@ -55,6 +55,6 @@ default_player: media_player.living_room
 
 ## Architecture
 
-The native Home Assistant Sonos integration remains responsible for normal speaker control. Sonos Remote adds a purpose-built mobile UI and a lightweight backend for features that are awkward or unavailable through the generic `media_player` frontend API.
+The native Home Assistant Sonos integration remains responsible for normal speaker control. Sonos Remote with Nuvo adds a purpose-built mobile UI and a lightweight backend for features that are awkward or unavailable through the generic `media_player` frontend API.
 
 Planned backend-assisted features include room/group management, Sonos Favorites/media browsing, queue access and manipulation, capability discovery, and richer search where Home Assistant/Sonos expose it.

@@ -1,9 +1,9 @@
 {
   "domain": "sonos_remote",
-  "name": "Sonos Remote",
-  "version": "0.3.0",
-  "documentation": "https://github.com/thomasny9/ha-sonos-remote",
-  "issue_tracker": "https://github.com/thomasny9/ha-sonos-remote/issues",
+  "name": "Sonos Remote + Nuvo",
+  "version": "0.4.0",
+  "documentation": "https://github.com/thomasny9/ha-sonos-remote-nuvo",
+  "issue_tracker": "https://github.com/thomasny9/ha-sonos-remote-nuvo/issues",
   "dependencies": ["sonos"],
   "codeowners": ["@thomasny9"],
   "config_flow": true,

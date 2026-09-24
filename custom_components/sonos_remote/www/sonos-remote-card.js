@@ -192,9 +192,16 @@ class SonosRemoteCard extends HTMLElement {
     return `<div class="fixedsettings"><div class="fixedtitle"><b>Fixed-volume Sonos</b><button id="closefixed"><ha-icon icon="mdi:close"></ha-icon></button></div><small>Mark Sonos outputs whose volume is controlled by Nuvo or another amplifier.</small>${(this._players||[]).map(p=>`<label class="fixedrow"><span>${this._esc(p.attributes?.friendly_name||p.entity_id)}</span><input type="checkbox" data-fixed-player="${p.entity_id}" ${this._isFixedVolume(p)?"checked":""}></label>`).join("")}</div>`;
   }
   _openMusicAssistant() {
-    // Music Assistant registers its HA panel at /music-assistant.
-    history.pushState(null,"","/music-assistant");
-    window.dispatchEvent(new Event("location-changed"));
+    // Music Assistant is exposed by Home Assistant at /app/<addon-slug>.
+    // Keep navigation origin-relative so it works with local HA URLs, Nabu Casa,
+    // and the Companion App without hard-coding a host.
+    const path = "/app/d5369777_music_assistant";
+    history.pushState(null, "", path);
+    window.dispatchEvent(new CustomEvent("location-changed", {
+      detail: { replace: false },
+      bubbles: true,
+      composed: true,
+    }));
   }
   _nuvoZones() {
     return (this._nuvoInfo?.zones||[]).map(z=>this._hass.states[z.entity_id]||{entity_id:z.entity_id,state:z.state,attributes:z});
@@ -467,4 +474,4 @@ class SonosRemoteCard extends HTMLElement {
 if(!customElements.get("sonos-remote-card")) customElements.define("sonos-remote-card",SonosRemoteCard);
 window.customCards=window.customCards||[];
 window.customCards.push({type:"sonos-remote-card",name:"Sonos Remote with Nuvo",description:"Mobile-first Sonos and Nuvo remote for Home Assistant."});
-console.info("%c SONOS REMOTE WITH NUVO %c v0.6.1 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");
+console.info("%c SONOS REMOTE WITH NUVO %c v0.6.2 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");

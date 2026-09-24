@@ -37,7 +37,7 @@ The integration serves the card at:
 
 Add the following URL once under **Settings → Dashboards → Resources** as a **JavaScript Module**:
 
-`/sonos_remote/sonos-remote-card.js?v=0.5.0`
+`/sonos_remote/sonos-remote-card.js?v=0.5.1`
 
 This explicit Lovelace resource is intentional. It avoids a Home Assistant cold-load race where automatically injected custom-card JavaScript can load after the dashboard tries to create the card, resulting in a temporary **Custom element doesn't exist** error after a hard refresh.
 

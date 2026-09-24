@@ -9,8 +9,12 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 
 from .const import CARD_URL, DOMAIN, VERSION
+
+STORAGE_VERSION = 1
+STORAGE_KEY = f"{DOMAIN}.settings"
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -20,6 +24,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     frontend_path = Path(__file__).parent / "www" / "sonos-remote-card.js"
     domain_data = hass.data.setdefault(DOMAIN, {})
+
+    if "fixed_volume_players" not in domain_data:
+        stored = await Store(hass, STORAGE_VERSION, STORAGE_KEY).async_load() or {}
+        domain_data["fixed_volume_players"] = set(stored.get("fixed_volume_players", []))
 
     if not domain_data.get("static_registered"):
         await hass.http.async_register_static_paths(
@@ -35,6 +43,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, websocket_sonos_remote_queue)
         websocket_api.async_register_command(hass, websocket_sonos_remote_queue_action)
         websocket_api.async_register_command(hass, websocket_sonos_remote_nuvo_info)
+        websocket_api.async_register_command(hass, websocket_sonos_remote_set_fixed_volume)
         domain_data["ws_registered"] = True
 
 
@@ -98,6 +107,30 @@ async def websocket_sonos_remote_nuvo_info(hass, connection, msg):
             }
         )
     connection.send_result(msg["id"], {"available": bool(zones), "zones": zones})
+
+@websocket_api.websocket_command(
+    {
+        "type": "sonos_remote/set_fixed_volume",
+        vol.Required("entity_id"): str,
+        vol.Required("fixed"): bool,
+    }
+)
+@websocket_api.async_response
+async def websocket_sonos_remote_set_fixed_volume(hass, connection, msg):
+    entity_id = msg["entity_id"]
+    if entity_id not in _sonos_entities(hass):
+        connection.send_error(msg["id"], "invalid_sonos_player", "Entity is not a Sonos media player")
+        return
+    fixed = hass.data.setdefault(DOMAIN, {}).setdefault("fixed_volume_players", set())
+    if msg["fixed"]:
+        fixed.add(entity_id)
+    else:
+        fixed.discard(entity_id)
+    await Store(hass, STORAGE_VERSION, STORAGE_KEY).async_save(
+        {"fixed_volume_players": sorted(fixed)}
+    )
+    connection.send_result(msg["id"], {"ok": True, "fixed_volume_players": sorted(fixed)})
+
 
 def _ma_entry(hass: HomeAssistant):
     entries = hass.config_entries.async_entries("music_assistant")
@@ -221,6 +254,7 @@ async def websocket_sonos_remote_info(hass, connection, msg):
         {
             "version": VERSION,
             "players": players,
+            "fixed_volume_players": sorted(hass.data.get(DOMAIN, {}).get("fixed_volume_players", set())),
             "music_assistant": {
                 "available": ma_entry is not None
                 and hass.services.has_service("music_assistant", "search"),

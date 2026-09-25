@@ -1,7 +1,7 @@
 {
   "domain": "sonos_remote",
   "name": "Sonos Remote with Nuvo",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "documentation": "https://github.com/thomasny9/ha-sonos-remote-nuvo",
   "issue_tracker": "https://github.com/thomasny9/ha-sonos-remote-nuvo/issues",
   "dependencies": ["sonos"],

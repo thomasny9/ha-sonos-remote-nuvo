@@ -25,11 +25,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     frontend_path = Path(__file__).parent / "www" / "sonos-remote-card.js"
     domain_data = hass.data.setdefault(DOMAIN, {})
 
-    if "fixed_volume_players" not in domain_data or "hidden_music_services" not in domain_data or "default_player" not in domain_data:
+    if "fixed_volume_players" not in domain_data or "hidden_music_services" not in domain_data or "default_player" not in domain_data or "default_zone" not in domain_data:
         stored = await Store(hass, STORAGE_VERSION, STORAGE_KEY).async_load() or {}
         domain_data.setdefault("fixed_volume_players", set(stored.get("fixed_volume_players", [])))
         domain_data.setdefault("hidden_music_services", set(stored.get("hidden_music_services", [])))
         domain_data.setdefault("default_player", stored.get("default_player"))
+        domain_data.setdefault("default_zone", stored.get("default_zone"))
 
     if not domain_data.get("static_registered"):
         await hass.http.async_register_static_paths(
@@ -49,6 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, websocket_sonos_remote_set_music_service_visible)
         websocket_api.async_register_command(hass, websocket_sonos_remote_browse)
         websocket_api.async_register_command(hass, websocket_sonos_remote_set_default_player)
+        websocket_api.async_register_command(hass, websocket_sonos_remote_set_default_zone)
         domain_data["ws_registered"] = True
 
 
@@ -142,8 +144,26 @@ async def _save_settings(hass: HomeAssistant) -> None:
             "fixed_volume_players": sorted(domain_data.get("fixed_volume_players", set())),
             "hidden_music_services": sorted(domain_data.get("hidden_music_services", set())),
             "default_player": domain_data.get("default_player"),
+            "default_zone": domain_data.get("default_zone"),
         }
     )
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "sonos_remote/set_default_zone",
+        vol.Required("entity_id"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def websocket_sonos_remote_set_default_zone(hass, connection, msg):
+    entity_id = msg["entity_id"]
+    if entity_id is not None and entity_id not in _nuvo_entities(hass):
+        connection.send_error(msg["id"], "invalid_nuvo_zone", "Entity is not a Nuvo media player")
+        return
+    hass.data.setdefault(DOMAIN, {})["default_zone"] = entity_id
+    await _save_settings(hass)
+    connection.send_result(msg["id"], {"ok": True, "default_zone": entity_id})
 
 
 @websocket_api.websocket_command(
@@ -324,6 +344,7 @@ async def websocket_sonos_remote_info(hass, connection, msg):
             "fixed_volume_players": sorted(hass.data.get(DOMAIN, {}).get("fixed_volume_players", set())),
             "hidden_music_services": sorted(hass.data.get(DOMAIN, {}).get("hidden_music_services", set())),
             "default_player": hass.data.get(DOMAIN, {}).get("default_player"),
+            "default_zone": hass.data.get(DOMAIN, {}).get("default_zone"),
             "music_assistant": {
                 "available": ma_entry is not None
                 and hass.services.has_service("music_assistant", "search"),

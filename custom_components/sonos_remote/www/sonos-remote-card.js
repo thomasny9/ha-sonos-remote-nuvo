@@ -453,7 +453,7 @@ class SonosRemoteCard extends HTMLElement {
         this._backendInfo={...(this._backendInfo||{}),default_player:r.default_player||null};
         if(entityId&&this._hass.states[entityId]){
           this._selected=entityId;
-          this._hybridTarget=`sonos:${entityId}`;
+          this._hybridTarget=entityId;
         }
         this._defaultPlayerOpen=false;
         this._render();

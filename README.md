@@ -4,7 +4,7 @@
 
 Sonos Remote with Nuvo is a mobile-first Home Assistant remote with a Lovelace frontend and a companion backend integration.
 
-## v0.7.4
+## v0.7.5
 
 This revision makes Nuvo rooms the primary listening targets in hybrid Sonos + Nuvo systems. The Now Playing selector includes individual Nuvo zones, active same-source multi-zone combinations, and the underlying Sonos sources. Nuvo selections control zone/group volume and source while Sonos remains the playback engine. Fixed-level Sonos sources no longer present a misleading Now Playing volume control.
 
@@ -21,7 +21,7 @@ This revision makes Nuvo rooms the primary listening targets in hybrid Sonos + N
 - Play/pause, previous and next
 - Volume control
 - Current group display
-- Four standard internal views: Now Playing, Rooms, Music and Queue\n- A fifth **My Music** tab appears when Music Assistant is available, with cached provider browsing, Back/Home navigation, and Play Now / Play Next / Add to Queue\n- Now Playing → ⋮ → **Default Nuvo zone** lets you choose and persist which Nuvo listening zone opens by default
+- Four standard internal views: Now Playing, Rooms, Music and Queue\n- A fifth **My Music** tab appears when Music Assistant is available, with cached provider browsing, Back/Home navigation, and Play Now / Play Next / Add to Queue\n- Now Playing → ⋮ → **Default Sonos player** lets you choose and persist which Sonos player opens by default and provides the music stream
 - Now Playing → ⋮ → **My Music services** controls which MA services appear at the My Music root\n- Sonos rows in Rooms show actual playback state separately from retained media titles (Playing, Paused, Idle, Off, Unavailable)\n- Nuvo zone rows resolve their selected Sonos source and show the same playback-state badge separately from the current/last media title
 - Home Assistant theme support
 - Rooms, Music and Queue are the next implementation stages
@@ -38,7 +38,7 @@ The integration serves the card at:
 
 Add the following URL once under **Settings → Dashboards → Resources** as a **JavaScript Module**:
 
-`/sonos_remote/sonos-remote-card.js?v=0.7.4`
+`/sonos_remote/sonos-remote-card.js?v=0.7.5`
 
 This explicit Lovelace resource is intentional. It avoids a Home Assistant cold-load race where automatically injected custom-card JavaScript can load after the dashboard tries to create the card, resulting in a temporary **Custom element doesn't exist** error after a hard refresh.
 

@@ -1,0 +1,632 @@
+class SonosRemoteCard extends HTMLElement {
+  setConfig(config) {
+    this.config = config || {};
+    this._view = this._view || "now";
+    this._selectedRooms = this._selectedRooms || new Set();
+    this._maResults = this._maResults || null;
+    this._recent = this._recent || null;
+    this._recentLoading = false;
+    this._maLoading = false;
+    this._maCategory = this._maCategory || null;
+    this._maMenu = null;
+    this._scrollTop = this._scrollTop || {};
+    this._pickerScrollTop = this._pickerScrollTop || {now:0,music:0,queue:0};
+    this._queue = this._queue || null;
+    this._queueLoading = false;
+    this._queuePlayer = this._queuePlayer || null;
+    this._progressTimer = null;
+    this._backendInfo = this._backendInfo || null;
+    this._nuvoInfo = this._nuvoInfo || null;
+    this._nuvoLoading = false;
+    this._hybridTarget = this._hybridTarget || null;
+    this._volumeSendTimer = null;
+    this._settingsOpen = this._settingsOpen || false;
+    this._musicServicesOpen = this._musicServicesOpen || false;
+    this._defaultPlayerOpen = this._defaultPlayerOpen || false;
+    this._nowMenuOpen = this._nowMenuOpen || false;
+    this._myMusic = this._myMusic || null;
+    this._myMusicLoading = false;
+    this._myMusicStack = this._myMusicStack || [];
+    this._myMusicCache = this._myMusicCache || new Map();
+    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+  }
+  set hass(hass) {
+    this._hass = hass;
+    this._players = this._backendInfo?.players?.map(p=>hass.states[p.entity_id]).filter(Boolean) || this._discoverPlayers(hass);
+    if (!this._backendInfo && !this._infoLoading) this._loadBackendInfo();
+    if (!this._nuvoInfo && !this._nuvoLoading) this._loadNuvoInfo();
+    if (!this._recent && !this._recentLoading) this._loadRecent();
+    this._selected = this._selected && hass.states[this._selected]
+      ? this._selected : (this._backendInfo?.default_player || this.config.default_player || this._players[0]?.entity_id);
+    if (!this._selectedRooms.size) (this._hass.states[this._selected]?.attributes?.group_members || [this._selected]).filter(Boolean).forEach(id => this._selectedRooms.add(id));
+    const active=this.shadowRoot?.activeElement;
+    const interactingWithPicker=this._pickerOpen && !!this.shadowRoot?.querySelector("#playerlist.open");
+    // Rooms is a long interactive selection surface. Rebuilding it for every
+    // Sonos state tick destroys the scroll container and causes iOS/HA to jump.
+    // Keep its DOM stable; room controls update themselves in place and Apply
+    // performs the next full render after the grouping action completes.
+    const interactingWithRooms=this._view==="rooms";
+    // Music is also a long scrollable selection surface. Rebuilding it for
+    // routine HA/Sonos state ticks resets its scroll container just like Rooms.
+    // Keep the Music DOM stable for the entire time that view is open; searches,
+    // category changes, player selection, and playback actions render explicitly.
+    const interactingWithMusic=this._view==="music";
+    // Queue is another long scrollable surface. Sonos/MA state ticks must not
+    // rebuild it while it is open or the scroll container jumps back to top.
+    // Explicit queue actions and room changes already refresh it themselves.
+    const interactingWithQueue=this._view==="queue";
+    const interactingWithMyMusic=this._view==="mymusic";
+    if(!interactingWithRooms && !interactingWithMusic && !interactingWithQueue && !interactingWithMyMusic && !interactingWithPicker) this._render();
+  }
+  getCardSize() { return 8; }
+  async _loadBackendInfo() {
+    if (!this._hass || this._infoLoading) return;
+    this._infoLoading = true;
+    try {
+      this._backendInfo = await this._hass.callWS({type:"sonos_remote/info"});
+      this._players = (this._backendInfo.players||[]).map(p=>this._hass.states[p.entity_id]).filter(Boolean);
+    } catch(e) { console.warn("Sonos Remote backend info unavailable",e); }
+    finally { this._infoLoading=false; this._render(); }
+  }
+  async _loadNuvoInfo(force=false) {
+    if(!this._hass || this._nuvoLoading || (!force && this._nuvoInfo)) return;
+    this._nuvoLoading=true;
+    try { this._nuvoInfo=await this._hass.callWS({type:"sonos_remote/nuvo_info"}); }
+    catch(e) { this._nuvoInfo={available:false,zones:[]}; }
+    finally { this._nuvoLoading=false; this._render(); }
+  }
+  _nuvoZonesHtml() {
+    const zones=this._nuvoInfo?.zones||[];
+    if(!zones.length)return "";
+    return `<div class="nuvohead"><span>Nuvo Zones</span><small>${zones.length} zone${zones.length===1?"":"s"}</small></div><div class="nuvolist">${zones.map(z=>{
+      const st=this._hass.states[z.entity_id],a=st?.attributes||z,v=Math.round((a.volume_level??z.volume_level??0)*100),off=(st?.state||z.state)==="off",src=a.source||z.source||"",sources=a.source_list||z.source_list||[];
+      const sonosId=!off?this._sonosForSource(src):null,sonos=sonosId?this._hass.states[sonosId]:null,sonosState=String(sonos?.state||"").toLowerCase();
+      const status=off?"Off":sonosState==="playing"?"Playing":sonosState==="paused"?"Paused":sonosState==="idle"?"Idle":sonosState==="off"?"Off":sonosState==="unavailable"?"Unavailable":"Not playing";
+      const title=sonos?.attributes?.media_title||"";
+      return `<div class="nuvozone"><div class="nuvotop"><button class="nuvopower ${off?"":"on"}" data-nuvo-power="${z.entity_id}"><ha-icon icon="mdi:power"></ha-icon></button><div class="nuvoname"><div class="nuvoztitle"><b>${this._esc(a.friendly_name||z.name||z.entity_id)}</b><span class="roomstate">${this._esc(status)}</span></div><small>${this._esc(title||src||(off?"Off":"No music"))}</small></div></div><div class="nuvoctl"><ha-icon icon="mdi:volume-medium"></ha-icon><input data-nuvo-vol="${z.entity_id}" type="range" min="0" max="100" value="${v}" ${off?"disabled":""}><span>${v}</span></div>${sources.length?`<select data-nuvo-source="${z.entity_id}" ${off?"disabled":""}>${sources.map(x=>`<option value="${this._esc(x)}" ${x===src?"selected":""}>${this._esc(x)}</option>`).join("")}</select>`:""}</div>`;
+    }).join("")}</div>`;
+  }
+  async _loadRecent(force=false) {
+    if(!this._hass || this._recentLoading || (!force && this._recent)) return;
+    this._recentLoading=true;
+    try { this._recent=await this._hass.callWS({type:"sonos_remote/recently_played",limit:10}); }
+    catch(e) { this._recent={available:false,items:[]}; }
+    finally { this._recentLoading=false; if(this._view==="music") this._render(); }
+  }
+  _recentHtml() {
+    const items=this._recent?.available?(this._recent.items||[]):[];
+    if(!items.length)return "";
+    return `<div class="sectiontitle">Recently Played</div>`+items.map(item=>{const uri=item.uri||item.media_content_id||"";const type=item.media_type||"track";const name=item.name||item.title||"Unknown";const sub=item.artist||item.album||String(type).replaceAll("_"," ");return `<div class="mawrap"><button class="fav maitem" data-recent-uri="${this._esc(uri)}" data-recent-type="${this._esc(type)}"><span class="favart"><ha-icon icon="mdi:history"></ha-icon></span><span><span class="favname">${this._esc(name)}</span><span class="favsub">${this._esc(sub||"Music Assistant")}</span></span></button><button class="maoptions" data-ma-options="${this._esc(uri)}" data-ma-type="${this._esc(type)}" aria-label="Playback options"><ha-icon icon="mdi:dots-vertical"></ha-icon></button>${this._maMenu===uri?`<div class="maactionmenu"><button data-ma-action="play" data-ma-uri="${this._esc(uri)}" data-ma-type="${this._esc(type)}">Play Now</button><button data-ma-action="next" data-ma-uri="${this._esc(uri)}" data-ma-type="${this._esc(type)}">Play Next</button><button data-ma-action="add" data-ma-uri="${this._esc(uri)}" data-ma-type="${this._esc(type)}">Add to End of Queue</button></div>`:""}</div>`}).join("");
+  }
+  async _searchMA(query, category=null) {
+    query=(query||"").trim();
+    if (!query || this._maLoading) return;
+    this._lastSearch=query;
+    this._maCategory=category;
+    this._maLoading=true;
+    this._render();
+    try { this._maResults=await this._hass.callWS({type:"sonos_remote/search",query,limit:category?20:5,media_type:category||undefined}); }
+    catch(e) { this._maResults={error:e?.message||"Music Assistant search failed"}; }
+    finally { this._maLoading=false; this._render(); }
+  }
+  _maResultsHtml() {
+    if(this._maLoading)return `<div class="mahint">Searching Music Assistant…</div>`;
+    if(!this._maResults)return `<div class="mahint">Search Apple Music, Spotify and your Music Assistant library.</div>`;
+    if(this._maResults.error)return `<div class="mahint">${this._esc(this._maResults.error)}</div>`;
+    const groups=[["tracks","Tracks","track","mdi:music-note"],["albums","Albums","album","mdi:album"],["artists","Artists","artist","mdi:account-music"],["playlists","Playlists","playlist","mdi:playlist-music"],["radio","Radio","radio","mdi:radio"]];
+    let html="";
+    if(this._maCategory) html+=`<button class="maback" data-ma-back><ha-icon icon="mdi:chevron-left"></ha-icon> All results</button>`;
+    for(const [key,label,type,icon] of groups){
+      if(this._maCategory && this._maCategory!==type) continue;
+      const items=this._maResults[key]||[];
+      if(!items.length)continue;
+      html+=`<div class="sectionrow"><div class="sectiontitle">${label}</div>${!this._maCategory?`<button class="seeall" data-ma-seeall="${type}">See All ›</button>`:""}</div>`+
+      items.map(item=>{const uri=item.uri||item.media_content_id||"";const provider=uri.includes("://")?uri.split("://")[0]:"Music Assistant";const artist=Array.isArray(item.artists)?item.artists.map(x=>x?.name||x).filter(Boolean).join(", "):(item.artist?.name||item.artist||item.artist_name||"");const album=item.album?.name||item.album||item.album_name||"";const sub=artist||album||provider;return `<div class="mawrap"><button class="fav maitem" data-ma-uri="${this._esc(uri)}" data-ma-type="${type}"><span class="favart"><ha-icon icon="${icon}"></ha-icon></span><span><span class="favname">${this._esc(item.name||item.title||"Unknown")}</span><span class="favsub">${this._esc(sub)}</span></span></button><button class="maoptions" data-ma-options="${this._esc(uri)}" data-ma-type="${type}" aria-label="Playback options"><ha-icon icon="mdi:dots-vertical"></ha-icon></button>${this._maMenu===uri?`<div class="maactionmenu"><button data-ma-action="play" data-ma-uri="${this._esc(uri)}" data-ma-type="${type}">Play Now</button><button data-ma-action="next" data-ma-uri="${this._esc(uri)}" data-ma-type="${type}">Play Next</button><button data-ma-action="add" data-ma-uri="${this._esc(uri)}" data-ma-type="${type}">Add to End of Queue</button></div>`:""}</div>`}).join("");
+    }
+    return html||`<div class="mahint">No results found.</div>`;
+  }
+  async _loadMyMusic(path=null, push=false, force=false) {
+    if(!this._hass || this._myMusicLoading || !this._backendInfo?.music_assistant?.available) return;
+    const key=path||"__root__";
+    if(push && this._myMusic) this._myMusicStack.push({path:this._myMusic.path, data:this._myMusic});
+    if(!force && this._myMusicCache.has(key)){
+      this._myMusic=this._myMusicCache.get(key);
+      this._render();
+      return;
+    }
+    this._myMusicLoading=true;
+    this._render();
+    try {
+      const msg={type:"sonos_remote/browse"};
+      if(path) msg.path=path;
+      this._myMusic=await this._hass.callWS(msg);
+      this._myMusicCache.set(key,this._myMusic);
+    } catch(e) {
+      this._myMusic={path,error:e?.message||"Unable to browse Music Assistant",items:[]};
+    } finally {
+      this._myMusicLoading=false;
+      this._render();
+    }
+  }
+  async _myMusicHome() {
+    this._myMusicStack=[];
+    const cached=this._myMusicCache.get("__root__");
+    if(cached){this._myMusic=cached;this._render();return;}
+    this._myMusic=null;
+    await this._loadMyMusic();
+  }
+  _browseType(item) {
+    const raw=item.media_type||item.media_item_type||item.type||"";
+    return String(raw).toLowerCase().replace("mediatype.","");
+  }
+  _browsePath(item) {
+    const returned=item.path||item.uri||"";
+    const current=this._myMusic?.path||"";
+    // At a provider root MA's BrowseFolder path can be serialized with the
+    // provider domain while browse routing requires the provider instance id.
+    // Rebuild first-level folder paths from the exact provider-instance root
+    // that successfully produced this listing.
+    if(current.endsWith("://") && this._browseType(item)==="folder" && item.item_id && item.item_id!=="root" && item.item_id!=="back"){
+      return current+item.item_id;
+    }
+    return returned;
+  }
+  _isMABackItem(item) { return (item.name===".." || item.item_id==="back") && !!this._myMusicStack.length; }
+  _isMARootItem(item) { return this._browsePath(item)==="root" || (item.item_id==="root" && item.provider==="library"); }
+  _musicServiceId(item) { return this._browsePath(item)||item.provider_instance||item.provider||item.name||item.title||""; }
+  _musicServiceVisible(item) { return !(this._backendInfo?.hidden_music_services||[]).includes(this._musicServiceId(item)); }
+  _browsePlayable(item) {
+    if(item.is_playable===true) return true;
+    return ["track","album","artist","playlist","radio","podcast","podcast_episode","audiobook"].includes(this._browseType(item));
+  }
+  _visibleMyMusicItems() {
+    let items=this._myMusic?.items||[];
+    items=items.filter(item=>!this._isMABackItem(item) && !this._isMARootItem(item));
+    if(!this._myMusic?.path && !this._myMusicStack.length) items=items.filter(item=>this._musicServiceVisible(item));
+    return items;
+  }
+  _myMusicHtml() {
+    if(this._myMusicLoading && !this._myMusic) return `<div class="mahint">Loading My Music…</div>`;
+    if(this._myMusic?.error) return `<div class="mahint">${this._esc(this._myMusic.error)}</div>`;
+    const items=this._visibleMyMusicItems();
+    if(!items.length) return `<div class="mahint">${this._myMusicLoading?"Loading…":"No browsable Music Assistant sources found."}</div>`;
+    const iconFor=t=>({artist:"mdi:account-music",album:"mdi:album",track:"mdi:music-note",playlist:"mdi:playlist-music",radio:"mdi:radio",podcast:"mdi:podcast",podcast_episode:"mdi:podcast",audiobook:"mdi:book-music"}[t]||"mdi:folder-music");
+    return items.map((item,i)=>{
+      const type=this._browseType(item);
+      const path=this._browsePath(item);
+      const playable=this._browsePlayable(item);
+      const name=item.name||item.title||item.translation_key||"Music";
+      const sub=item.provider_name||item.provider||item.owner||String(type||"Browse").replaceAll("_"," ");
+      const canBrowse=!!path && (type==="folder" || type==="browse_folder" || item.is_playable===false || !playable);
+      return `<div class="mawrap browseitem"><button class="fav maitem" data-browse-index="${i}" data-browse-path="${this._esc(path)}" data-browse-open="${canBrowse?"1":"0"}"><span class="favart"><ha-icon icon="${iconFor(type)}"></ha-icon></span><span><span class="favname">${this._esc(name)}</span><span class="favsub">${this._esc(sub)}</span></span><ha-icon icon="${canBrowse?"mdi:chevron-right":"mdi:play"}"></ha-icon></button>${playable?`<button class="maoptions" data-browse-options="${i}" aria-label="Playback options"><ha-icon icon="mdi:dots-vertical"></ha-icon></button>${this._maMenu===`browse:${i}`?`<div class="maactionmenu"><button data-browse-action="play" data-browse-index="${i}">Play Now</button><button data-browse-action="next" data-browse-index="${i}">Play Next</button><button data-browse-action="add" data-browse-index="${i}">Add to End of Queue</button></div>`:""}`:""}</div>`;
+    }).join("");
+  }
+
+  async _loadQueue(force=false) {
+    if(!this._selected || this._queueLoading) return;
+    if(!force && this._queuePlayer===this._selected && this._queue) return;
+    this._queueLoading=true; this._queuePlayer=this._selected; this._render();
+    try { this._queue=await this._hass.callWS({type:"sonos_remote/queue",sonos_entity_id:this._selected,limit:100}); }
+    catch(e) { this._queue={error:e?.message||"Unable to load queue"}; }
+    finally { this._queueLoading=false; this._render(); }
+  }
+  async _queueAction(action,itemId=null,index=null) {
+    try {
+      const msg={type:"sonos_remote/queue_action",sonos_entity_id:this._selected,action};
+      if(itemId) msg.item_id=itemId; else if(index!==null) msg.index=index;
+      await this._hass.callWS(msg);
+      await this._loadQueue(true);
+    } catch(e) {
+      this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:e?.message||"Unable to update queue"},bubbles:true,composed:true}));
+    }
+  }
+  _queueHtml() {
+    if(this._queueLoading && !this._queue) return `<div class="mahint">Loading queue…</div>`;
+    if(this._queue?.error) return `<div class="mahint">${this._esc(this._queue.error)}</div>`;
+    const items=this._queue?.items||[];
+    if(!items.length) return `<div class="queueempty"><ha-icon icon="mdi:playlist-music"></ha-icon><b>Queue is empty</b><span>Choose music to start a queue for this room.</span></div>`;
+    const current=Number(this._queue.current_index);
+    return items.map((item,i)=>{
+      const media=item.media_item||{};
+      const name=media.name||item.media_title||item.name||"Unknown";
+      const artists=Array.isArray(media.artists)?media.artists.map(x=>x?.name||x).filter(Boolean).join(", "):(media.artist_str||item.media_artist||item.artist||"");
+      const isCurrent=i===current;
+      const id=item.queue_item_id||item.item_id||item.id||"";
+      return `<div class="qitem ${isCurrent?"current":""}"><button class="qplay" data-qplay="${this._esc(id)}" data-qindex="${i}"><span class="qnum">${isCurrent?'<ha-icon icon="mdi:volume-high"></ha-icon>':i+1}</span><span class="qcopy"><b>${this._esc(name)}</b><small>${this._esc(artists)}</small></span></button><button class="qremove" data-qremove="${this._esc(id)}" data-qindex="${i}" aria-label="Remove"><ha-icon icon="mdi:close"></ha-icon></button></div>`;
+    }).join("");
+  }
+  _discoverPlayers(hass) {
+    const configured = this.config.entities || [];
+    if (configured.length) return configured.map(id => hass.states[id]).filter(Boolean);
+    return Object.values(hass.states).filter(s => s.entity_id.startsWith("media_player.") &&
+      (s.attributes.platform === "sonos" || Array.isArray(s.attributes.sonos_group) ||
+       (s.attributes.device_class === "speaker" && "group_members" in s.attributes)));
+  }
+  _groups() {
+    const seen=new Set(), groups=[];
+    for(const p of this._players||[]) {
+      const raw=p.attributes?.group_members||p.attributes?.sonos_group||[p.entity_id];
+      const members=[...new Set((raw||[p.entity_id]).filter(id=>this._players.some(x=>x.entity_id===id)))];
+      const key=[...members].sort().join("|");
+      if(!key||seen.has(key)) continue;
+      seen.add(key);
+      const leader=members[0]||p.entity_id;
+      groups.push({leader,members,names:members.map(id=>this._hass.states[id]?.attributes?.friendly_name||id)});
+    }
+    return groups;
+  }
+  _playerChoices() {
+    const grouped=new Set(), choices=[];
+    for(const g of this._groups()) {
+      if(g.members.length>1) {
+        g.members.forEach(id=>grouped.add(id));
+        choices.push({id:g.leader,label:g.names.join(" + "),sub:`${g.members.length} rooms grouped`,icon:"mdi:speaker-multiple"});
+      }
+    }
+    for(const p of this._players||[]) if(!grouped.has(p.entity_id)) choices.push({id:p.entity_id,label:p.attributes?.friendly_name||p.entity_id,sub:p.state==="playing"?(p.attributes?.media_title||"Playing"):"Not playing",icon:"mdi:speaker"});
+    return choices;
+  }
+  _supports(entity, feature) {
+    const n=Number(entity?.attributes?.supported_features||0);
+    return (n & feature)===feature;
+  }
+  _isFixedVolume(entity) {
+    return (this._backendInfo?.fixed_volume_players||[]).includes(entity?.entity_id);
+  }
+  _canSetVolume(entity) {
+    return this._supports(entity,4) && !this._isFixedVolume(entity);
+  }
+  _canMute(entity) { return this._supports(entity,8); }
+  _fixedVolumeSettingsHtml() {
+    if(!this._settingsOpen)return "";
+    return `<div class="fixedsettings"><div class="fixedtitle"><b>Fixed-volume Sonos</b><button id="closefixed"><ha-icon icon="mdi:close"></ha-icon></button></div><small>Mark Sonos outputs whose volume is controlled by Nuvo or another amplifier.</small>${(this._players||[]).map(p=>`<label class="fixedrow"><span>${this._esc(p.attributes?.friendly_name||p.entity_id)}</span><input type="checkbox" data-fixed-player="${p.entity_id}" ${this._isFixedVolume(p)?"checked":""}></label>`).join("")}</div>`;
+  }
+  _defaultPlayerSettingsHtml() {
+    if(!this._defaultPlayerOpen)return "";
+    const selected=this._backendInfo?.default_player||"";
+    return `<div class="fixedsettings"><div class="fixedtitle"><b>Default Sonos player</b><button id="closedefaultplayer"><ha-icon icon="mdi:close"></ha-icon></button></div><small>Choose which Sonos source the remote uses by default on the Now Playing screen.</small>${(this._players||[]).map(p=>`<label class="fixedrow"><span>${this._esc(p.attributes?.friendly_name||p.entity_id)}</span><input type="radio" name="default-sonos-player" data-default-player="${p.entity_id}" ${selected===p.entity_id?"checked":""}></label>`).join("")}<label class="fixedrow"><span>Use card / first available player</span><input type="radio" name="default-sonos-player" data-default-player="" ${!selected?"checked":""}></label></div>`;
+  }
+  _musicServicesSettingsHtml() {
+    if(!this._musicServicesOpen)return "";
+    const items=this._myMusic?.path||this._myMusicStack.length?[]:(this._myMusic?.items||[]);
+    return `<div class="fixedsettings"><div class="fixedtitle"><b>My Music services</b><button id="closeservices"><ha-icon icon="mdi:close"></ha-icon></button></div><small>Choose which Music Assistant services appear at the top level of My Music.</small>${items.length?items.map(item=>{const id=this._musicServiceId(item);const name=item.name||item.title||item.translation_key||"Music";return `<label class="fixedrow"><span>${this._esc(name)}</span><input type="checkbox" data-music-service="${this._esc(id)}" ${this._musicServiceVisible(item)?"checked":""}></label>`}).join(""):`<div class="mahint">Open My Music once to load your Music Assistant services.</div>`}</div>`;
+  }
+  _openMusicAssistant() {
+    // Music Assistant is exposed by Home Assistant at /app/<addon-slug>.
+    // Keep navigation origin-relative so it works with local HA URLs, Nabu Casa,
+    // and the Companion App without hard-coding a host.
+    const path = "/app/d5369777_music_assistant";
+    history.pushState(null, "", path);
+    window.dispatchEvent(new CustomEvent("location-changed", {
+      detail: { replace: false },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+  _nuvoZones() {
+    return (this._nuvoInfo?.zones||[]).map(z=>this._hass.states[z.entity_id]||{entity_id:z.entity_id,state:z.state,attributes:z});
+  }
+  _sonosForSource(source) {
+    const key=String(source||"").trim().toLowerCase();
+    if(!key)return null;
+    const words=key.replace(/[^a-z0-9]+/g," ").trim().split(/\s+/).filter(Boolean);
+    let best=null,bestScore=0;
+    for(const p of this._players||[]){
+      const name=String(p.attributes?.friendly_name||p.entity_id).toLowerCase();
+      let score=name===key?100:(name.includes(key)||key.includes(name)?50:0);
+      for(const w of words)if(w.length>1&&name.includes(w))score+=5;
+      if(score>bestScore){best=p.entity_id;bestScore=score;}
+    }
+    return bestScore>=5?best:null;
+  }
+  _hybridChoices() {
+    const zones=this._nuvoZones(), choices=[];
+    for(const z of zones){
+      const a=z.attributes||{},src=a.source||"";
+      choices.push({id:`nuvo:${z.entity_id}`,kind:"nuvo",entities:[z.entity_id],label:a.friendly_name||z.entity_id,sub:src?`Nuvo · ${src}`:"Nuvo zone",icon:"mdi:speaker"});
+    }
+    const bySource=new Map();
+    for(const z of zones){
+      if(z.state==="off")continue;
+      const src=z.attributes?.source||"";
+      if(!src)continue;
+      if(!bySource.has(src))bySource.set(src,[]);
+      bySource.get(src).push(z);
+    }
+    for(const [src,members] of bySource){
+      if(members.length<2)continue;
+      choices.push({id:`nuvogroup:${encodeURIComponent(src)}`,kind:"nuvogroup",entities:members.map(x=>x.entity_id),label:members.map(x=>x.attributes?.friendly_name||x.entity_id).join(" + "),sub:`${members.length} Nuvo zones · ${src}`,icon:"mdi:speaker-multiple"});
+    }
+    for(const p of this._playerChoices())choices.push({...p,kind:"sonos",entities:[p.id],sub:`Sonos source · ${p.sub}`});
+    return choices;
+  }
+  _hybridChoice() {
+    const choices=this._hybridChoices();
+    return choices.find(x=>x.id===this._hybridTarget)||choices.find(x=>x.kind==="nuvo")||choices[0]||null;
+  }
+  _hybridContext() {
+    const choice=this._hybridChoice();
+    if(!choice)return {choice:null,entities:[],source:"",sources:[],volume:null,sonos:this._selected};
+    if(choice.kind==="sonos")return {choice,entities:[],source:"",sources:[],volume:null,sonos:choice.id};
+    const states=choice.entities.map(id=>this._hass.states[id]).filter(Boolean);
+    const source=states[0]?.attributes?.source||"";
+    const sourceLists=states.map(x=>x.attributes?.source_list||[]).filter(x=>x.length);
+    const sources=sourceLists.length?sourceLists.reduce((a,b)=>a.filter(x=>b.includes(x))):[];
+    const vols=states.map(x=>x.attributes?.volume_level).filter(v=>Number.isFinite(v));
+    const volume=vols.length?Math.round((vols.reduce((a,b)=>a+b,0)/vols.length)*100):0;
+    return {choice,entities:choice.entities,source,sources,volume,sonos:this._sonosForSource(source)||this._selected};
+  }
+  _currentGroup() {
+    if(!this._selected) return [];
+    const g=this._groups().find(x=>x.members.includes(this._selected));
+    return g?.members?.length ? [...g.members] : [this._selected];
+  }
+  _sameMembers(a,b) {
+    if(a.length!==b.length) return false;
+    const x=[...a].sort(), y=[...b].sort();
+    return x.every((v,i)=>v===y[i]);
+  }
+  _groupActionLabel() {
+    const chosen=[...this._selectedRooms];
+    const current=this._currentGroup();
+    if(!chosen.length) return "Select Rooms";
+    if(this._sameMembers(chosen,current)) return "Group Is Current";
+    if(current.length>1) return chosen.length===1 ? "Ungroup Selected Room" : "Update Group";
+    return chosen.length>1 ? `Group ${chosen.length} Rooms` : "Select Another Room";
+  }
+  _call(service, data={}) {
+    if (!this._selected) return;
+    return this._hass.callService("media_player", service, {entity_id:this._selected, ...data});
+  }
+  _esc(v) { const d=document.createElement("div"); d.textContent=v||""; return d.innerHTML; }
+  _tab(id,icon,label) {
+    return `<button class="tab ${this._view===id?"active":""}" data-view="${id}"><ha-icon icon="${icon}"></ha-icon><span>${label}</span></button>`;
+  }
+  _favoritesHtml() {
+    const sensor=Object.values(this._hass.states).find(s=>s.entity_id.startsWith("sensor.")&&s.entity_id.includes("sonos_favorites"));
+    const items=sensor?.attributes?.items||{};
+    const entries=Object.entries(items);
+    if(!entries.length)return '<div class="artist">Enable the Sonos Favorites sensor to show My Sonos favorites here.</div>';
+    return entries.map(([id,name])=>`<button class="fav" data-favorite="${this._esc(id)}"><span class="favart"><ha-icon icon="mdi:heart"></ha-icon></span><span><span class="favname">${this._esc(name)}</span><span class="favsub">Sonos Favorite</span></span><ha-icon icon="mdi:play"></ha-icon></button>`).join("");
+  }
+  _render() {
+    if (!this.shadowRoot || !this._hass) return;
+    const oldMain=this.shadowRoot.querySelector(".viewscroll");
+    if(oldMain) this._scrollTop[this._view]=oldMain.scrollTop;
+    const oldPicker=this.shadowRoot.querySelector("#playerlist");
+    if(oldPicker) this._pickerScrollTop[this._view]=oldPicker.scrollTop;
+    const hybrid=this._hybridContext();
+    if(hybrid.sonos && this._hass.states[hybrid.sonos]) this._selected=hybrid.sonos;
+    const st=this._hass.states[this._selected], a=st?.attributes||{};
+    const title=a.media_title||"Nothing playing", artist=a.media_artist||"", album=a.media_album_name||"";
+    const art=a.entity_picture?this._hass.hassUrl(a.entity_picture):"", playing=st?.state==="playing";
+    const volume=Math.round((a.volume_level||0)*100);
+    const duration=Number(a.media_duration||0);
+    let position=Number(a.media_position||0);
+    if(playing && a.media_position_updated_at){
+      const updated=Date.parse(a.media_position_updated_at);
+      if(Number.isFinite(updated)) position+=Math.max(0,(Date.now()-updated)/1000);
+    }
+    if(duration>0) position=Math.min(duration,position);
+    const progress=duration>0?Math.max(0,Math.min(100,(position/duration)*100)):0;
+    const fmt=n=>{n=Math.max(0,Math.floor(Number(n)||0));return `${Math.floor(n/60)}:${String(n%60).padStart(2,"0")}`;};
+    const members=a.group_members||a.sonos_group||[this._selected].filter(Boolean);
+    const rooms=members.map(id=>this._hass.states[id]?.attributes?.friendly_name||id).join(" + ");
+    this.shadowRoot.innerHTML=`
+    <style>
+      :host{display:block} ha-card{height:min(760px,calc(100dvh - 96px));min-height:620px;overflow:hidden;border-radius:22px;background:#111214;color:#f5f5f5;border:0;box-shadow:0 14px 40px rgba(0,0,0,.28);display:flex;flex-direction:column}.viewscroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#4a4d52 transparent}.viewscroll.nowview{overflow-y:hidden}.mymusichead{display:grid;grid-template-columns:72px 1fr 72px;align-items:center;gap:4px}.mymusichead h1{text-align:center;margin:0}.mymusicback,.mymusichome{display:flex;align-items:center;gap:2px;color:#b7bac0;font-size:13px;padding:6px 0}.mymusichome{justify-self:end}.mymusichome ha-icon{--mdc-icon-size:20px}.browseitem .fav{padding-right:8px}
+      .wrap{position:relative;padding:8px 18px 2px}.top{position:relative}.eyebrow{display:flex;align-items:center;justify-content:center;gap:8px;padding:0 38px}.nowmenuwrap{position:absolute;right:18px;top:8px;display:inline-flex}.nowmore{display:grid;place-items:center;width:30px;min-height:28px;border-radius:9px;background:#202124;color:#b7bac0}.nowmore ha-icon{--mdc-icon-size:18px}.nowmenu{position:absolute;z-index:45;right:0;top:32px;width:190px;background:#202124;border:1px solid #34363a;border-radius:12px;padding:5px;box-shadow:0 12px 30px rgba(0,0,0,.45);text-align:left;text-transform:none;letter-spacing:normal}.nowmenu button{display:flex;align-items:center;gap:9px;width:100%;min-height:40px;padding:0 10px;border-radius:8px;font-size:13px}.nowmenu button:hover{background:#303236}.nowmenu ha-icon{--mdc-icon-size:18px}.fixedsettings{position:absolute;z-index:40;left:18px;right:18px;top:42px;background:#202124;border:1px solid #34363a;border-radius:14px;padding:12px;box-shadow:0 14px 34px rgba(0,0,0,.55);text-align:left;text-transform:none;letter-spacing:normal}.fixedtitle{display:flex;align-items:center;justify-content:space-between;font-size:14px;color:#f5f5f5}.fixedtitle button{min-height:32px;width:32px}.fixedsettings>small{display:block;color:#8f9297;font-size:11px;margin:2px 0 8px}.fixedrow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 2px;border-top:1px solid #34363a;color:#f5f5f5;font-size:13px}.fixedrow input{width:18px;height:18px}.top{display:flex;justify-content:center;align-items:center;margin-bottom:4px}.playerpick{display:flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px;margin:0;background:transparent;color:#f5f5f5;font-size:20px;font-weight:700}.playerpick span{max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.picker{display:none;margin:0 0 14px;padding:8px;border-radius:14px;background:#202124}.hybridsource{width:100%;box-sizing:border-box;margin:0 0 6px;padding:8px 12px;border:1px solid #34363a;border-radius:10px;background:#202124;color:#f5f5f5;font-size:14px}.picker.open{display:block;max-height:240px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#4a4d52 transparent}.pickrow{display:flex;align-items:center;gap:9px;width:100%;padding:9px 10px;border-radius:10px;text-align:left;color:#f5f5f5}.pickrow.active{background:#303236}.pickrow span{flex:1}.art,.placeholder{aspect-ratio:1/1;width:min(100%,240px);margin:0 auto;border-radius:16px;background:#202124}
+      .art{object-fit:contain;display:block;background:#111214}.placeholder{display:grid;place-items:center;font-size:64px;opacity:.65}.meta{text-align:center}.progress{margin:5px 0 1px}.progress input{width:100%}.progress.live{margin:13px 0 7px}.liveline{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;color:#8f9297;font-size:10px;letter-spacing:.12em}.liveline span{height:1px;background:#3b3d41}.liveline b{font-weight:700}.times{display:flex;justify-content:space-between;color:#8f9297;font-size:11px}.topcopy{text-align:center;min-width:0}.eyebrow{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:#8f9297;font-weight:700}
+      h2{margin:7px 0 3px;font-size:24px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .artist,.album{color:#a9acb1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.album{font-size:13px;margin-top:3px}
+      .controls{display:grid;grid-template-columns:1fr 1fr 1.2fr 1fr 1fr;align-items:center;margin:2px 18px 1px}
+      button{appearance:none;border:0;background:none;color:inherit;min-height:48px;cursor:pointer}.activecmd{color:var(--primary-color)}.main{width:56px;height:56px;min-height:56px;background:#f5f5f5;color:#111214;border-radius:50%;justify-self:center}.main ha-icon{--mdc-icon-size:28px}.skip ha-icon{--mdc-icon-size:30px}
+      .volume{display:grid;grid-template-columns:28px 1fr 38px;gap:8px;align-items:center;margin:0 18px 1px}.volume input{width:100%}
+      .group{margin:0 18px 3px;padding:5px 14px;min-height:30px;box-sizing:border-box;border-radius:14px;background:#202124;cursor:pointer}.group small{display:block;color:var(--secondary-text-color);margin-bottom:3px}
+      .tabs{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #2a2c2f;background:#151618;padding:7px 4px calc(7px + env(safe-area-inset-bottom));z-index:5}
+      .tabs.ma{grid-template-columns:repeat(5,1fr)}\n      .tab{font-size:11px;opacity:.62;display:flex;flex-direction:column;gap:4px;align-items:center}.tab.active{opacity:1;color:#fff}.tab ha-icon{--mdc-icon-size:22px}
+      .rooms{padding:18px;min-height:100%;box-sizing:border-box}.roomhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.roomhead h1{margin:0;font-size:28px}.roomsummary{font-size:12px;color:#8f9297;margin:-6px 0 14px}.roomlist{border-top:1px solid #292b2f}.room{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;align-items:center;padding:10px 2px;border-bottom:1px solid #292b2f;background:transparent}.check{width:26px;height:26px;min-height:26px;border:1px solid #62656a;border-radius:50%;display:grid;place-items:center}.check.on{background:#f5f5f5;border-color:#f5f5f5;color:#111214}.roommain{min-width:0}.roomline{display:flex;align-items:center;gap:8px}.roomname{font-weight:650;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.roomstate{font-size:11px;color:#8f9297}.roomsub{font-size:12px;color:#8f9297;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}.roomvol{display:grid;grid-template-columns:20px 1fr 30px;gap:7px;align-items:center;margin-top:7px}.roomvol input{width:100%;margin:0}.roomvol span{text-align:right;font-size:11px;color:#8f9297}.roomvol ha-icon{--mdc-icon-size:17px;color:#8f9297}.applybar{position:sticky;bottom:0;padding:12px 0 2px;background:linear-gradient(transparent,#111214 22%)}.apply{width:100%;height:46px;border-radius:23px!important;background:#f5f5f5!important;color:#111214!important;font-weight:700;margin-top:8px}.apply:disabled{opacity:.35;cursor:default}.nuvohead{display:flex;justify-content:space-between;align-items:center;margin:22px 0 8px;padding-top:16px;border-top:1px solid #34363a;font-weight:700}.nuvohead small{font-size:11px;color:#8f9297;font-weight:500}.nuvozone{padding:11px 2px;border-bottom:1px solid #292b2f}.nuvotop{display:flex;align-items:center;gap:10px}.nuvopower{width:30px;height:30px;min-height:30px;border:1px solid #55585d;border-radius:50%;display:grid;place-items:center;color:#8f9297}.nuvopower.on{background:#f5f5f5;color:#111214;border-color:#f5f5f5}.nuvopower ha-icon{--mdc-icon-size:17px}.nuvoname{min-width:0}.nuvoztitle{display:flex;align-items:center;gap:8px}.nuvoztitle b{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.nuvoname b,.nuvoname small{display:block}.nuvoname small{font-size:11px;color:#8f9297;margin-top:1px}.nuvoctl{display:grid;grid-template-columns:20px 1fr 30px;gap:7px;align-items:center;margin:9px 0 8px 40px}.nuvoctl ha-icon{--mdc-icon-size:17px;color:#8f9297}.nuvoctl input{width:100%;margin:0}.nuvoctl span{text-align:right;font-size:11px;color:#8f9297}.nuvozone select{margin-left:40px;width:calc(100% - 40px);background:#202124;color:#f5f5f5;border:1px solid #34363a;border-radius:9px;padding:8px 9px;font:inherit;font-size:12px}.roomstate:not(:empty){padding:2px 6px;border-radius:8px;background:#25272a}.pickrow small{display:block;color:#8f9297;font-size:11px;margin-top:2px}.pickrow b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .music{padding:18px;min-height:100%;box-sizing:border-box}.music .roomhead{margin-bottom:7px}.music .roomhead h1{color:#f5f5f5}.musicdestlabel{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#8f9297;font-weight:700}.music .playerpick{justify-content:flex-start;padding:4px 0 9px;font-size:17px;max-width:100%}.music .picker{margin-bottom:12px}.sectionrow{display:flex;align-items:center;justify-content:space-between;margin-top:18px}.sectionrow .sectiontitle{margin:0 0 10px}.seeall,.maback{min-height:36px;color:#a9acb1;font-size:13px;padding:0 2px}.maback{display:flex;align-items:center;gap:2px;margin:0 0 6px}.maback ha-icon{--mdc-icon-size:18px}.search{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;background:#202124;border:1px solid #2d2f33;border-radius:14px;padding:10px 13px;margin-bottom:16px;color:#a9acb1}.search input{border:0;outline:0;background:transparent;color:#f5f5f5;font:inherit;width:100%}.search input::placeholder{color:#777b81}.sectiontitle{font-size:17px;font-weight:700;margin:18px 0 10px;color:#f5f5f5}.fav{display:grid;grid-template-columns:48px minmax(0,1fr) 28px;gap:10px;align-items:center;width:100%;padding:9px;border-radius:12px;background:#202124;color:#f5f5f5;margin-bottom:7px;text-align:left}.favart{width:48px;height:48px;border-radius:9px;background:#2b2d31;display:grid;place-items:center;color:#d7d8da}.favname{display:block;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favsub{display:block;font-size:12px;color:#8f9297;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mahint{padding:12px 4px;color:#8f9297;font-size:13px}.maitem{text-align:left;width:100%}.mawrap{position:relative}.mawrap .maitem{padding-right:44px}.maoptions{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:38px;min-height:38px;display:grid;place-items:center;z-index:2}.maoptions ha-icon{--mdc-icon-size:20px}.maactionmenu{position:absolute;right:4px;top:42px;z-index:25;width:180px;background:#202124;border:1px solid #34363a;border-radius:12px;padding:5px;box-shadow:0 12px 30px rgba(0,0,0,.45)}.maactionmenu button{display:block;width:100%;min-height:40px;text-align:left;padding:0 10px;border-radius:8px;font-size:13px}.maactionmenu button:hover{background:#303236}.queue{padding:18px;min-height:100%;box-sizing:border-box}.queue .roomhead{margin-bottom:4px}.queue .playerpick{justify-content:flex-start;padding:4px 0 10px;font-size:17px;max-width:100%}.queue .picker{margin-bottom:12px}.queuehead{display:flex;align-items:center;justify-content:space-between}.clearq{min-height:38px;color:#a9acb1;font-size:13px;padding:0 2px}.qitem{display:grid;grid-template-columns:minmax(0,1fr) 42px;align-items:center;border-bottom:1px solid #292b2f}.qitem.current{background:#1d1f22;border-radius:10px}.qplay{display:grid;grid-template-columns:34px minmax(0,1fr);gap:8px;align-items:center;text-align:left;padding:8px 2px;min-width:0}.qnum{display:grid;place-items:center;color:#8f9297;font-size:12px}.qnum ha-icon{--mdc-icon-size:18px;color:#f5f5f5}.qcopy{min-width:0}.qcopy b,.qcopy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qcopy b{font-size:14px}.qcopy small{font-size:12px;color:#8f9297;margin-top:2px}.qremove{min-height:42px;color:#777b81}.qremove ha-icon{--mdc-icon-size:18px}.queueempty{min-height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#8f9297;gap:8px}.queueempty ha-icon{--mdc-icon-size:42px}.queueempty b{color:#f5f5f5}.queueempty span{font-size:13px;max-width:240px}.stub{min-height:100%;box-sizing:border-box;padding:20px}.stub h2{margin-top:0}@media(min-width:600px){ha-card{max-width:430px;margin:auto}}
+    </style><ha-card>
+    <main class="viewscroll ${this._view==="now"?"nowview":""}">${this._view==="now"?`<div class="wrap"><div class="top"><div class="topcopy"><div class="eyebrow">Now Playing<div class="nowmenuwrap"><button class="nowmore" id="nowmore" title="Options"><ha-icon icon="mdi:dots-horizontal"></ha-icon></button>${this._nowMenuOpen?`<div class="nowmenu">${this._backendInfo?.music_assistant?.available?`<button id="openma"><ha-icon icon="mdi:music-box-multiple"></ha-icon><span>Music Assistant</span></button>`:""}<button id="defaultplayeropen"><ha-icon icon="mdi:speaker"></ha-icon><span>Default Sonos player</span></button><button id="fixedopen"><ha-icon icon="mdi:volume-lock"></ha-icon><span>Sonos fixed volume</span></button>${this._backendInfo?.music_assistant?.available?`<button id="servicesopen"><ha-icon icon="mdi:music-box-multiple-outline"></ha-icon><span>My Music services</span></button>`:""}</div>`:""}</div>${this._fixedVolumeSettingsHtml()}${this._defaultPlayerSettingsHtml()}${this._musicServicesSettingsHtml()}</div><button class="playerpick" id="playerpick"><span>${this._esc(hybrid.choice?.label||a.friendly_name||"Select room")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button></div></div><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._hybridChoices().map(p=>`<button class="pickrow ${p.id===hybrid.choice?.id?"active":""}" data-select-hybrid="${this._esc(p.id)}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===hybrid.choice?.id?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div>${hybrid.choice&&hybrid.choice.kind!=="sonos"&&hybrid.sources.length?`<select class="hybridsource" id="hybridsource">${hybrid.sources.map(x=>`<option value="${this._esc(x)}" ${x===hybrid.source?"selected":""}>${this._esc(x)}</option>`).join("")}</select>`:""}${art?`<img class="art" src="${art}" alt="">`:`<div class="placeholder">♫</div>`}<div class="meta"><h2>${this._esc(title)}</h2><div class="artist">${this._esc(artist)}</div><div class="album">${this._esc(album)}</div><div class="progress ${duration?"":"live"}">${duration?`<input id="seek" type="range" min="0" max="100" value="${progress}"><div class="times"><span id="elapsed">${fmt(position)}</span><span>${fmt(duration)}</span></div>`:`<div class="liveline"><span></span><b>LIVE</b><span></span></div>`}</div></div></div>
+    <div class="controls"><button class="${a.shuffle?"activecmd":""}" data-action="shuffle"><ha-icon icon="mdi:shuffle-variant"></ha-icon></button><button class="skip" data-action="previous"><ha-icon icon="mdi:skip-previous"></ha-icon></button><button class="main" data-action="toggle"><ha-icon icon="${playing?"mdi:pause":"mdi:play"}"></ha-icon></button><button class="skip" data-action="next"><ha-icon icon="mdi:skip-next"></ha-icon></button><button class="${a.repeat&&a.repeat!=="off"?"activecmd":""}" data-action="repeat"><ha-icon icon="${a.repeat==="one"?"mdi:repeat-once":"mdi:repeat"}"></ha-icon></button></div>
+    ${hybrid.choice?.kind!=="sonos"?`<div class="volume"><ha-icon icon="mdi:volume-medium"></ha-icon><input id="hybridvol" type="range" min="0" max="100" value="${hybrid.volume??0}"><span>${hybrid.volume??0}</span></div>`:""}
+    <div class="group" data-view="rooms"><small>${hybrid.choice?.kind==="sonos"?"Sonos source":"Playing in"}</small>${this._esc(hybrid.choice?.label||rooms||"Select a room")} ›</div>`:
+    this._view==="rooms"?`<div class="rooms"><div class="roomhead"><h1>Rooms</h1></div><div class="roomsummary">${this._players.length} Sonos rooms · ${this._groups().filter(g=>g.members.length>1).length} active group${this._groups().filter(g=>g.members.length>1).length===1?"":"s"}</div><div class="roomlist">${this._players.map(p=>{const pa=p.attributes||{},v=Math.round((pa.volume_level||0)*100),on=this._selectedRooms.has(p.entity_id),gm=pa.group_members||[p.entity_id],grouped=gm.length>1,state=String(p.state||"").toLowerCase(),status=state==="playing"?"Playing":state==="paused"?"Paused":state==="idle"?"Idle":state==="off"?"Off":state==="unavailable"?"Unavailable":"Not playing",title=pa.media_title||"";return `<div class="room"><button class="check ${on?"on":""}" data-room="${p.entity_id}">${on?"✓":""}</button><div class="roommain"><div class="roomline"><div class="roomname">${this._esc(pa.friendly_name||p.entity_id)}</div><div class="roomstate">${this._esc(status)}${grouped?` · ${gm.length} rooms`:""}</div></div><div class="roomsub">${this._esc(title||(grouped?"Grouped":"No music"))}</div>${this._canSetVolume(p)?`<div class="roomvol"><ha-icon icon="mdi:volume-medium"></ha-icon><input data-roomvol="${p.entity_id}" type="range" min="0" max="100" value="${v}"><span>${v}</span></div>`:`<div class="roomfixed"><ha-icon icon="mdi:volume-lock"></ha-icon><span>Fixed output</span></div>`}</div></div>`}).join("")}</div><div class="applybar"><button class="apply" id="apply" ${(!this._selectedRooms.size||this._sameMembers([...this._selectedRooms],this._currentGroup()))?"disabled":""}>${this._groupActionLabel()}</button></div><div id="nuvozones">${this._nuvoZonesHtml()}</div></div>`:this._view==="music"?`<div class="music"><div class="roomhead"><h1>Music</h1></div><div class="musicdestlabel">Play in</div><button class="playerpick" id="playerpick"><span>${this._esc(this._playerChoices().find(p=>p.id===this._selected)?.label||a.friendly_name||"Select Sonos")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._playerChoices().map(p=>`<button class="pickrow ${p.id===this._selected?"active":""}" data-select-player="${p.id}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===this._selected?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div><label class="search"><ha-icon icon="mdi:magnify"></ha-icon><input id="musicsearch" placeholder="Search Music Assistant" value="${this._esc(this._lastSearch||"")}"></label>${this._backendInfo?.music_assistant?.available?`<div id="maresults">${this._maResultsHtml()}</div>`:""}${this._backendInfo?.music_assistant?.available?`<div id="recent">${this._recentHtml()}</div>`:""}<div class="sectiontitle">Sonos Favorites</div><div id="favorites">${this._favoritesHtml()}</div></div>`:this._view==="mymusic"?`<div class="music"><div class="mymusichead"><span>${this._myMusicStack.length?`<button class="mymusicback" id="mymusicback"><ha-icon icon="mdi:chevron-left"></ha-icon>Back</button>`:""}</span><h1>My Music</h1><span>${this._myMusicStack.length?`<button class="mymusichome" id="mymusichome" title="My Music home"><ha-icon icon="mdi:home"></ha-icon></button>`:""}</span></div><div class="musicdestlabel">Browse Music Assistant</div><div id="mymusicitems">${this._myMusicHtml()}</div></div>`:this._view==="queue"?`<div class="queue"><div class="queuehead"><div class="roomhead"><h1>Queue</h1></div>${(this._queue?.items||[]).length?`<button class="clearq" id="clearqueue">Clear Queue</button>`:""}</div><div class="musicdestlabel">Queue for</div><button class="playerpick" id="playerpick"><span>${this._esc(this._playerChoices().find(p=>p.id===this._selected)?.label||a.friendly_name||"Select Sonos")}</span><ha-icon icon="mdi:chevron-down"></ha-icon></button><div class="picker ${this._pickerOpen?"open":""}" id="playerlist">${this._playerChoices().map(p=>`<button class="pickrow ${p.id===this._selected?"active":""}" data-select-player="${p.id}"><ha-icon icon="${p.icon}"></ha-icon><span><b>${this._esc(p.label)}</b><small>${this._esc(p.sub)}</small></span>${p.id===this._selected?`<ha-icon icon="mdi:check"></ha-icon>`:""}</button>`).join("")}</div><div id="queueitems">${this._queueHtml()}</div></div>`:`<div class="stub"><h2>${this._view[0].toUpperCase()+this._view.slice(1)}</h2><div class="artist">Coming in the next implementation stage</div></div>`}
+    </main><nav class="tabs ${this._backendInfo?.music_assistant?.available?"ma":""}">${this._tab("now","mdi:music-circle","Now Playing")}${this._tab("rooms","mdi:speaker-multiple","Rooms")}${this._tab("music","mdi:music-note","Music")}${this._tab("queue","mdi:playlist-music","Queue")}${this._backendInfo?.music_assistant?.available?this._tab("mymusic","mdi:bookshelf","My Music"):""}</nav></ha-card>`;
+    const mainScroll=this.shadowRoot.querySelector(".viewscroll");
+    if(mainScroll) mainScroll.scrollTop=this._scrollTop[this._view]||0;
+    if(mainScroll && this._view==="music") mainScroll.addEventListener("scroll",()=>{if(this._maMenu!==null){this._maMenu=null;this.shadowRoot.querySelector(".maactionmenu")?.remove();}},{passive:true});
+    const pickerScroll=this.shadowRoot.querySelector("#playerlist");
+    if(pickerScroll) pickerScroll.scrollTop=this._pickerScrollTop[this._view]||0;
+    this.shadowRoot.querySelectorAll("[data-view]").forEach(el=>el.onclick=()=>{this._view=el.dataset.view;this._render();if(this._view==="queue")this._loadQueue();if(this._view==="mymusic"&&!this._myMusic)this._loadMyMusic();});
+    this.shadowRoot.querySelector("#playerpick")?.addEventListener("click",()=>{this._pickerOpen=!this._pickerOpen;this._render();});
+    this.shadowRoot.querySelector("#nowmore")?.addEventListener("click",e=>{e.stopPropagation();this._nowMenuOpen=!this._nowMenuOpen;this._render();});
+    this.shadowRoot.querySelector("#openma")?.addEventListener("click",e=>{e.stopPropagation();this._nowMenuOpen=false;this._openMusicAssistant();});
+    this.shadowRoot.querySelector("#defaultplayeropen")?.addEventListener("click",e=>{e.stopPropagation();this._nowMenuOpen=false;this._defaultPlayerOpen=true;this._render();});
+    this.shadowRoot.querySelector("#closedefaultplayer")?.addEventListener("click",e=>{e.stopPropagation();this._defaultPlayerOpen=false;this._render();});
+    this.shadowRoot.querySelectorAll("[data-default-player]").forEach(el=>el.addEventListener("change",async e=>{
+      e.stopPropagation();
+      const entityId=e.target.dataset.defaultPlayer||null;
+      try{
+        const r=await this._hass.callWS({type:"sonos_remote/set_default_player",entity_id:entityId});
+        this._backendInfo={...(this._backendInfo||{}),default_player:r.default_player||null};
+        if(entityId&&this._hass.states[entityId]){
+          this._selected=entityId;
+          this._hybridTarget=`sonos:${entityId}`;
+        }
+        this._defaultPlayerOpen=false;
+        this._render();
+      }catch(err){
+        this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:err?.message||"Unable to save default Sonos player"},bubbles:true,composed:true}));
+      }
+    }));
+    this.shadowRoot.querySelector("#fixedopen")?.addEventListener("click",e=>{e.stopPropagation();this._nowMenuOpen=false;this._settingsOpen=true;this._render();});
+    this.shadowRoot.querySelector("#servicesopen")?.addEventListener("click",async e=>{e.stopPropagation();this._nowMenuOpen=false;this._settingsOpen=false;this._musicServicesOpen=true;if(!this._myMusic||this._myMusic.path||this._myMusicStack.length){this._myMusic=null;this._myMusicStack=[];await this._loadMyMusic();}else this._render();});
+    this.shadowRoot.querySelector("#closeservices")?.addEventListener("click",e=>{e.stopPropagation();this._musicServicesOpen=false;this._render();});
+    this.shadowRoot.querySelectorAll("[data-music-service]").forEach(el=>el.addEventListener("change",async e=>{e.stopPropagation();const id=e.target.dataset.musicService;try{const r=await this._hass.callWS({type:"sonos_remote/set_music_service_visible",service_id:id,visible:e.target.checked});this._backendInfo={...(this._backendInfo||{}),hidden_music_services:r.hidden_music_services||[]};if(this._view==="mymusic")this._render();}catch(err){e.target.checked=!e.target.checked;}}));
+    this.shadowRoot.querySelector("#closefixed")?.addEventListener("click",e=>{e.stopPropagation();this._settingsOpen=false;this._render();});
+    this.shadowRoot.querySelectorAll("[data-fixed-player]").forEach(el=>el.addEventListener("change",async e=>{
+      e.stopPropagation();
+      try {
+        const r=await this._hass.callWS({type:"sonos_remote/set_fixed_volume",entity_id:e.target.dataset.fixedPlayer,fixed:e.target.checked});
+        this._backendInfo={...(this._backendInfo||{}),fixed_volume_players:r.fixed_volume_players||[]};
+        this._render();
+      } catch(err) {
+        e.target.checked=!e.target.checked;
+      }
+    }));
+    this.shadowRoot.querySelector("#playerlist")?.addEventListener("scroll",e=>{this._pickerScrollTop[this._view]=e.currentTarget.scrollTop;},{passive:true});
+    this.shadowRoot.querySelectorAll("[data-select-hybrid]").forEach(el=>el.onclick=()=>{
+      this._hybridTarget=el.dataset.selectHybrid;
+      const ctx=this._hybridContext();
+      if(ctx.sonos&&this._hass.states[ctx.sonos])this._selected=ctx.sonos;
+      this._pickerOpen=false;this._pickerScrollTop[this._view]=0;this._render();
+    });
+    this.shadowRoot.querySelector("#hybridsource")?.addEventListener("change",async e=>{
+      const ctx=this._hybridContext(); if(!ctx.entities.length)return;
+      await this._hass.callService("media_player","select_source",{entity_id:ctx.entities,source:e.target.value});
+      const sonos=this._sonosForSource(e.target.value);if(sonos)this._selected=sonos;
+      setTimeout(()=>this._loadNuvoInfo(true),250);
+    });
+    const hybridVol=this.shadowRoot.querySelector("#hybridvol");
+    hybridVol?.addEventListener("input",e=>{const n=e.target.nextElementSibling;if(n)n.textContent=e.target.value;});
+    hybridVol?.addEventListener("change",e=>{const ctx=this._hybridContext();if(ctx.entities.length)this._hass.callService("media_player","volume_set",{entity_id:ctx.entities,volume_level:Number(e.target.value)/100});});
+    this.shadowRoot.querySelectorAll("[data-select-player]").forEach(el=>el.onclick=()=>{this._selected=el.dataset.selectPlayer;this._pickerOpen=false;this._pickerScrollTop[this._view]=0;if(this._view==="queue"){this._queue=null;this._queuePlayer=null;}const g=this._groups().find(x=>x.members.includes(this._selected));this._selectedRooms=new Set(g?.members||[this._selected]);this._render();if(this._view==="queue")this._loadQueue(true);});
+    this.shadowRoot.querySelector('[data-action="toggle"]')?.addEventListener("click",()=>this._call("media_play_pause"));
+    this.shadowRoot.querySelector('[data-action="previous"]')?.addEventListener("click",()=>this._call("media_previous_track"));
+    this.shadowRoot.querySelector('[data-action="next"]')?.addEventListener("click",()=>this._call("media_next_track"));
+    this.shadowRoot.querySelector('[data-action="shuffle"]')?.addEventListener("click",()=>this._call("shuffle_set",{shuffle:!a.shuffle}));
+    this.shadowRoot.querySelector('[data-action="repeat"]')?.addEventListener("click",()=>{const next=a.repeat==="off"?"all":a.repeat==="all"?"one":"off";this._call("repeat_set",{repeat:next});});
+    this.shadowRoot.querySelector('[data-action="mute"]')?.addEventListener("click",()=>this._call("volume_mute",{is_volume_muted:!a.is_volume_muted}));
+    this.shadowRoot.querySelector("#seek")?.addEventListener("change",e=>{if(duration>0)this._call("media_seek",{seek_position:(Number(e.target.value)/100)*duration});});
+    clearInterval(this._progressTimer);
+    this._progressTimer=null;
+    if(this._view==="now" && playing && duration>0){
+      let livePosition=position;
+      this._progressTimer=setInterval(()=>{
+        livePosition=Math.min(duration,livePosition+1);
+        const seek=this.shadowRoot?.querySelector("#seek");
+        const elapsed=this.shadowRoot?.querySelector("#elapsed");
+        if(seek) seek.value=String(Math.max(0,Math.min(100,(livePosition/duration)*100)));
+        if(elapsed) elapsed.textContent=fmt(livePosition);
+        if(livePosition>=duration){clearInterval(this._progressTimer);this._progressTimer=null;}
+      },1000);
+    }
+    this.shadowRoot.querySelectorAll("[data-roomvol]").forEach(el=>{
+      el.addEventListener("input",e=>{const n=e.target.nextElementSibling;if(n)n.textContent=e.target.value;clearTimeout(this._volumeSendTimer);const id=e.target.dataset.roomvol,v=Number(e.target.value)/100;this._volumeSendTimer=setTimeout(()=>this._hass.callService("media_player","volume_set",{entity_id:id,volume_level:v}),120);});
+      el.addEventListener("change",e=>{clearTimeout(this._volumeSendTimer);this._hass.callService("media_player","volume_set",{entity_id:e.target.dataset.roomvol,volume_level:Number(e.target.value)/100});});
+    });
+    this.shadowRoot.querySelectorAll("[data-nuvo-power]").forEach(el=>el.onclick=async()=>{const id=el.dataset.nuvoPower,st=this._hass.states[id];await this._hass.callService("media_player",st?.state==="off"?"turn_on":"turn_off",{entity_id:id});setTimeout(()=>this._loadNuvoInfo(true),350);});
+    this.shadowRoot.querySelectorAll("[data-nuvo-vol]").forEach(el=>{el.addEventListener("input",e=>{const n=e.target.nextElementSibling;if(n)n.textContent=e.target.value;clearTimeout(this._volumeSendTimer);const id=e.target.dataset.nuvoVol,v=Number(e.target.value)/100;this._volumeSendTimer=setTimeout(()=>this._hass.callService("media_player","volume_set",{entity_id:id,volume_level:v}),120);});el.addEventListener("change",e=>{clearTimeout(this._volumeSendTimer);this._hass.callService("media_player","volume_set",{entity_id:e.target.dataset.nuvoVol,volume_level:Number(e.target.value)/100});});});
+    this.shadowRoot.querySelectorAll("[data-nuvo-source]").forEach(el=>el.onchange=async()=>{await this._hass.callService("media_player","select_source",{entity_id:el.dataset.nuvoSource,source:el.value});setTimeout(()=>this._loadNuvoInfo(true),250);});
+    this.shadowRoot.querySelectorAll("[data-room]").forEach(el=>el.onclick=()=>{const id=el.dataset.room;this._selectedRooms.has(id)?this._selectedRooms.delete(id):this._selectedRooms.add(id);const on=this._selectedRooms.has(id);el.classList.toggle("on",on);el.textContent=on?"✓":"";const apply=this.shadowRoot.querySelector("#apply");if(apply){const same=!this._selectedRooms.size||this._sameMembers([...this._selectedRooms],this._currentGroup());apply.disabled=same;apply.textContent=this._groupActionLabel();}});
+    this.shadowRoot.querySelectorAll("[data-ma-options]").forEach(el=>el.onclick=e=>{e.stopPropagation();this._maMenu=this._maMenu===el.dataset.maOptions?null:el.dataset.maOptions;this._render();});
+    this.shadowRoot.querySelectorAll("[data-ma-action]").forEach(el=>el.onclick=async e=>{e.stopPropagation();const action=el.dataset.maAction;try{await this._hass.callWS({type:"sonos_remote/play",sonos_entity_id:this._selected,media_id:el.dataset.maUri,media_type:el.dataset.maType,enqueue:action==="play"?"replace":action});this._maMenu=null;this._queue=null;this._queuePlayer=null;if(action==="play"){this._view="now";this._render();}else{this._render();}}catch(err){this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:err?.message||"Unable to update queue"},bubbles:true,composed:true}));}});
+    this.shadowRoot.querySelectorAll("[data-recent-uri]").forEach(el=>el.onclick=async()=>{try{await this._hass.callWS({type:"sonos_remote/play",sonos_entity_id:this._selected,media_id:el.dataset.recentUri,media_type:el.dataset.recentType,enqueue:"replace"});this._view="now";this._render();}catch(e){this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:e?.message||"Unable to play this recently played item"},bubbles:true,composed:true}));}});
+    this.shadowRoot.querySelectorAll("[data-favorite]").forEach(el=>el.onclick=async()=>{try{await this._hass.callService("media_player","play_media",{entity_id:this._selected,media_content_type:"favorite_item_id",media_content_id:el.dataset.favorite});this._view="now";this._render();}catch(e){this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:e?.message||"Unable to play this Sonos Favorite"},bubbles:true,composed:true}));}});
+    this.shadowRoot.querySelector("#mymusicback")?.addEventListener("click",()=>{
+      const prev=this._myMusicStack.pop();
+      if(prev){this._myMusic=prev.data;this._render();}
+      else this._loadMyMusic();
+    });
+    this.shadowRoot.querySelector("#mymusichome")?.addEventListener("click",()=>this._myMusicHome());
+    this.shadowRoot.querySelectorAll("[data-browse-open]").forEach(el=>el.onclick=async()=>{
+      const item=this._visibleMyMusicItems()[Number(el.dataset.browseIndex)];
+      if(!item)return;
+      if(el.dataset.browseOpen==="1"){
+        await this._loadMyMusic(el.dataset.browsePath,true);
+        return;
+      }
+      const uri=item.uri||item.media_content_id||item.path||"";
+      if(!uri)return;
+      try{
+        await this._hass.callWS({type:"sonos_remote/play",sonos_entity_id:this._selected,media_id:uri,media_type:this._browseType(item),enqueue:"replace"});
+        this._view="now";this._render();
+      }catch(e){this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:e?.message||"Unable to play this Music Assistant item"},bubbles:true,composed:true}));}
+    });
+    this.shadowRoot.querySelectorAll("[data-browse-options]").forEach(el=>el.onclick=e=>{e.stopPropagation();const key=`browse:${el.dataset.browseOptions}`;this._maMenu=this._maMenu===key?null:key;this._render();});
+    this.shadowRoot.querySelectorAll("[data-browse-action]").forEach(el=>el.onclick=async e=>{
+      e.stopPropagation();
+      const item=this._visibleMyMusicItems()[Number(el.dataset.browseIndex)];
+      if(!item)return;
+      const uri=item.uri||item.media_content_id||item.path||"";
+      const action=el.dataset.browseAction;
+      try{
+        await this._hass.callWS({type:"sonos_remote/play",sonos_entity_id:this._selected,media_id:uri,media_type:this._browseType(item),enqueue:action==="play"?"replace":action});
+        this._maMenu=null;this._queue=null;this._queuePlayer=null;
+        if(action==="play")this._view="now";
+        this._render();
+      }catch(err){this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:err?.message||"Unable to update queue"},bubbles:true,composed:true}));}
+    });
+    const musicSearch=this.shadowRoot.querySelector("#musicsearch");
+    musicSearch?.addEventListener("input",e=>{this._lastSearch=e.target.value;});
+    musicSearch?.addEventListener("keydown",e=>{
+      if(e.key==="Enter"){
+        e.preventDefault();
+        e.stopPropagation();
+        this._searchMA(e.target.value);
+      }
+    });
+    this.shadowRoot.querySelectorAll("[data-ma-seeall]").forEach(el=>el.onclick=()=>this._searchMA(this._lastSearch,el.dataset.maSeeall));
+    this.shadowRoot.querySelector("[data-ma-back]")?.addEventListener("click",()=>this._searchMA(this._lastSearch,null));
+    this.shadowRoot.querySelectorAll("[data-ma-uri]").forEach(el=>el.onclick=async()=>{
+      try{
+        await this._hass.callWS({
+          type:"sonos_remote/play",
+          sonos_entity_id:this._selected,
+          media_id:el.dataset.maUri,
+          media_type:el.dataset.maType,
+          enqueue:"replace"
+        });
+        this._view="now";
+        this._render();
+      }catch(e){
+        this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:e?.message||"Unable to play this Music Assistant item"},bubbles:true,composed:true}));
+      }
+    });
+    this.shadowRoot.querySelector("#openmedia")?.addEventListener("click",()=>{this._hass.navigate?.("/media-browser/browser");});
+    this.shadowRoot.querySelectorAll("[data-qplay]").forEach(el=>el.onclick=()=>this._queueAction("play",el.dataset.qplay||null,Number(el.dataset.qindex)));
+    this.shadowRoot.querySelectorAll("[data-qremove]").forEach(el=>el.onclick=e=>{e.stopPropagation();this._queueAction("remove",el.dataset.qremove||null,Number(el.dataset.qindex));});
+    this.shadowRoot.querySelector("#clearqueue")?.addEventListener("click",()=>this._queueAction("clear"));
+    this.shadowRoot.querySelector("#apply")?.addEventListener("click",async()=>{
+      const chosen=[...this._selectedRooms];
+      if(!chosen.length)return;
+      const before=this._currentGroup();
+      if(this._sameMembers(chosen,before))return;
+      const leader=chosen.includes(this._selected)?this._selected:chosen[0];
+      try{
+        // Detach members that are being removed from the current group.
+        for(const id of before){
+          if(id!==leader && !chosen.includes(id))
+            await this._hass.callService("media_player","unjoin",{entity_id:id});
+        }
+        // Detach rooms selected from other existing groups before joining this one.
+        for(const id of chosen){
+          if(id===leader)continue;
+          const other=this._groups().find(g=>g.members.includes(id) && !g.members.includes(leader));
+          if(other?.members?.length>1)
+            await this._hass.callService("media_player","unjoin",{entity_id:id});
+        }
+        // If only the leader remains selected, separate it from any remaining group.
+        if(chosen.length===1 && before.length>1)
+          await this._hass.callService("media_player","unjoin",{entity_id:leader});
+        else {
+          const others=chosen.filter(id=>id!==leader);
+          if(others.length)
+            await this._hass.callService("media_player","join",{entity_id:leader,group_members:others});
+        }
+        this._selected=leader;
+        this._selectedRooms=new Set(chosen);
+        this._backendInfo=null;
+        await this._loadBackendInfo();
+      }catch(e){
+        this.dispatchEvent(new CustomEvent("hass-notification",{detail:{message:e?.message||"Unable to update Sonos group"},bubbles:true,composed:true}));
+      }
+    });
+  }
+}
+if(!customElements.get("sonos-remote-card")) customElements.define("sonos-remote-card",SonosRemoteCard);
+window.customCards=window.customCards||[];
+window.customCards.push({type:"sonos-remote-card",name:"Sonos Remote with Nuvo",description:"Mobile-first Sonos and Nuvo remote for Home Assistant."});
+console.info("%c SONOS REMOTE WITH NUVO %c v0.6.4 ","color:white;background:#03a9f4;font-weight:bold","color:#03a9f4;background:white");

@@ -22,7 +22,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    frontend_path = Path(__file__).parent / "www" / "sonos-remote-card.js"
+    frontend_path = Path(__file__).parent / "www" / "sonos-remote-card-v072.js"
     domain_data = hass.data.setdefault(DOMAIN, {})
 
     if "fixed_volume_players" not in domain_data or "hidden_music_services" not in domain_data or "default_player" not in domain_data:

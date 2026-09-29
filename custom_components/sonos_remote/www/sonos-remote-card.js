@@ -68,12 +68,25 @@ class SonosRemoteCard extends HTMLElement {
     } catch(e) { console.warn("Sonos Remote backend info unavailable",e); }
     finally { this._infoLoading=false; this._render(); }
   }
-  async _loadNuvoInfo(force=false) {
+  async _loadNuvoInfo(force=false, preserveRoomsScroll=false) {
     if(!this._hass || this._nuvoLoading || (!force && this._nuvoInfo)) return;
+    if(preserveRoomsScroll && this._view==="rooms"){
+      const main=this.shadowRoot?.querySelector(".viewscroll");
+      if(main) this._scrollTop.rooms=main.scrollTop;
+    }
     this._nuvoLoading=true;
     try { this._nuvoInfo=await this._hass.callWS({type:"sonos_remote/nuvo_info"}); }
     catch(e) { this._nuvoInfo={available:false,zones:[]}; }
-    finally { this._nuvoLoading=false; this._render(); }
+    finally {
+      this._nuvoLoading=false;
+      this._render();
+      if(preserveRoomsScroll && this._view==="rooms"){
+        requestAnimationFrame(()=>{
+          const main=this.shadowRoot?.querySelector(".viewscroll");
+          if(main) main.scrollTop=this._scrollTop.rooms||0;
+        });
+      }
+    }
   }
   _nuvoZonesHtml() {
     const zones=this._nuvoInfo?.zones||[];
@@ -516,7 +529,7 @@ class SonosRemoteCard extends HTMLElement {
       el.addEventListener("input",e=>{const n=e.target.nextElementSibling;if(n)n.textContent=e.target.value;clearTimeout(this._volumeSendTimer);const id=e.target.dataset.roomvol,v=Number(e.target.value)/100;this._volumeSendTimer=setTimeout(()=>this._hass.callService("media_player","volume_set",{entity_id:id,volume_level:v}),120);});
       el.addEventListener("change",e=>{clearTimeout(this._volumeSendTimer);this._hass.callService("media_player","volume_set",{entity_id:e.target.dataset.roomvol,volume_level:Number(e.target.value)/100});});
     });
-    this.shadowRoot.querySelectorAll("[data-nuvo-power]").forEach(el=>el.onclick=async()=>{const id=el.dataset.nuvoPower,st=this._hass.states[id];const main=this.shadowRoot.querySelector(".viewscroll");if(main)this._scrollTop.rooms=main.scrollTop;await this._hass.callService("media_player",st?.state==="off"?"turn_on":"turn_off",{entity_id:id});setTimeout(()=>this._loadNuvoInfo(true),350);});
+    this.shadowRoot.querySelectorAll("[data-nuvo-power]").forEach(el=>el.onclick=async()=>{const id=el.dataset.nuvoPower,st=this._hass.states[id];const main=this.shadowRoot.querySelector(".viewscroll");if(main)this._scrollTop.rooms=main.scrollTop;await this._hass.callService("media_player",st?.state==="off"?"turn_on":"turn_off",{entity_id:id});setTimeout(()=>this._loadNuvoInfo(true,true),350);});
     this.shadowRoot.querySelectorAll("[data-nuvo-vol]").forEach(el=>{el.addEventListener("input",e=>{const n=e.target.nextElementSibling;if(n)n.textContent=e.target.value;clearTimeout(this._volumeSendTimer);const id=e.target.dataset.nuvoVol,v=Number(e.target.value)/100;this._volumeSendTimer=setTimeout(()=>this._hass.callService("media_player","volume_set",{entity_id:id,volume_level:v}),120);});el.addEventListener("change",e=>{clearTimeout(this._volumeSendTimer);this._hass.callService("media_player","volume_set",{entity_id:e.target.dataset.nuvoVol,volume_level:Number(e.target.value)/100});});});
     this.shadowRoot.querySelectorAll("[data-nuvo-source]").forEach(el=>el.onchange=async()=>{await this._hass.callService("media_player","select_source",{entity_id:el.dataset.nuvoSource,source:el.value});setTimeout(()=>this._loadNuvoInfo(true),250);});
     this.shadowRoot.querySelectorAll("[data-room]").forEach(el=>el.onclick=()=>{const id=el.dataset.room;this._selectedRooms.has(id)?this._selectedRooms.delete(id):this._selectedRooms.add(id);const on=this._selectedRooms.has(id);el.classList.toggle("on",on);el.textContent=on?"✓":"";const apply=this.shadowRoot.querySelector("#apply");if(apply){const same=!this._selectedRooms.size||this._sameMembers([...this._selectedRooms],this._currentGroup());apply.disabled=same;apply.textContent=this._groupActionLabel();}});

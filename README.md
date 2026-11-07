@@ -4,7 +4,11 @@
 
 Sonos Remote with Nuvo is a mobile-first Home Assistant remote with a Lovelace frontend and a companion backend integration.
 
-## v0.7.7
+## v0.7.8
+
+- Sonos source mute/unmute controls are available on Now Playing and in Rooms, including fixed-volume Ports. A red mute indicator appears when the source is muted.
+- Nuvo zones show **Source muted** when their selected Sonos source is muted; no automatic unmute occurs on Nuvo power-up.
+
 
 This revision makes Nuvo rooms the primary listening targets in hybrid Sonos + Nuvo systems. The Now Playing selector includes individual Nuvo zones, active same-source multi-zone combinations, and the underlying Sonos sources. Nuvo selections control zone/group volume and source while Sonos remains the playback engine. Fixed-level Sonos sources no longer present a misleading Now Playing volume control.
 
@@ -39,7 +43,7 @@ The integration serves the card at:
 
 Add the following URL once under **Settings → Dashboards → Resources** as a **JavaScript Module**:
 
-`/sonos_remote/sonos-remote-card.js?v=0.7.7`
+`/sonos_remote/sonos-remote-card.js?v=0.7.8`
 
 This explicit Lovelace resource is intentional. It avoids a Home Assistant cold-load race where automatically injected custom-card JavaScript can load after the dashboard tries to create the card, resulting in a temporary **Custom element doesn't exist** error after a hard refresh.
 
